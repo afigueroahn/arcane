@@ -1,5 +1,6 @@
 import { m } from '#lib/paraglide/messages.js';
 import type { ContainerDetails, ContainerStats, ContainerSummary } from '#lib/types/container.js';
+import type { DockerInfo } from '#lib/types/dockerinfo.js';
 import type { Environment, EnvironmentStatus } from '#lib/types/environment.js';
 import type { ProjectUpdateInfo } from '#lib/types/project.js';
 import type { SwarmServiceModeName, SwarmServiceModeSpec } from '#lib/types/swarm.js';
@@ -13,6 +14,11 @@ export const SWARM_STACK_LABEL = 'com.docker.stack.namespace';
 
 export function getManagedByLabel(labels?: Record<string, string> | null): string | undefined {
 	return labels?.[COMPOSE_PROJECT_LABEL] || labels?.[SWARM_STACK_LABEL] || undefined;
+}
+
+/** Railpack builds need Docker's containerd image store; the backend enforces this, so this check only warns early. */
+export function usesContainerdImageStore(info: Pick<DockerInfo, 'DriverStatus'>): boolean {
+	return (info.DriverStatus ?? []).some(([key, value]) => key === 'driver-type' && value === 'io.containerd.snapshotter.v1');
 }
 
 export function calculateCPUPercent(stats: ContainerStats | null): number {

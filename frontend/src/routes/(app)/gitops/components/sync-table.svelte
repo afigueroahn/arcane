@@ -43,6 +43,7 @@
 	import { bulkConfirmAndRun, confirmAndRun } from '#lib/utils/bulk-actions.js';
 	import { rowKey, type EnvironmentPage, type EnvironmentRow } from '#lib/utils/environments.js';
 	import { formatDateTimeShort } from '#lib/utils/formatting.js';
+	import { showGitSyncResultToast } from '#lib/utils/gitops.js';
 	import { toGitRouteUrl } from '#lib/utils/navigation.js';
 	import { tryCatch } from '#lib/utils/try-catch.js';
 
@@ -106,6 +107,13 @@
 
 	function isBackup(sync: GitOpsSync): boolean {
 		return sync.mode === 'backup';
+	}
+
+	// Backups point at their destination folder, Railpack syncs at the app folder they build, the rest at the compose file.
+	function repositoryPathInternal(sync: GitOpsSync): string {
+		if (isBackup(sync)) return sync.backupDirectory ?? '';
+		if (sync.buildStrategy === 'railpack') return sync.sourcePath || '.';
+		return sync.composePath;
 	}
 
 	function openBackupHistory(sync: SyncRow) {
@@ -188,8 +196,12 @@
 			result,
 			message: isBackup(sync) ? m.backup_failed() : m.git_sync_failed(),
 			setLoadingState: () => {},
-			onSuccess: async () => {
-				toast.success(isBackup(sync) ? m.backup_completed() : m.git_sync_success());
+			onSuccess: async (result) => {
+				if (isBackup(sync)) {
+					toast.success(m.backup_completed());
+				} else {
+					showGitSyncResultToast(result, sync.environmentId);
+				}
 				await invalidateSyncs();
 			}
 		});
@@ -290,6 +302,9 @@
 			<span class="font-medium">{item.name}</span>
 		{/if}
 		<LifecycleIndicator scriptPath={item.preDeployScriptPath} />
+		{#if item.buildStrategy === 'railpack'}
+			<Badge variant="purple" title={m.build_strategy_railpack_description()}>{m.railpack()}</Badge>
+		{/if}
 	</span>
 {/snippet}
 
@@ -313,10 +328,12 @@
 {/snippet}
 
 {#snippet PathCell({ item }: { item: SyncRow })}
-	{@const path = isBackup(item) ? (item.backupDirectory ?? '') : item.composePath}
-	{@const route = isBackup(item) ? 'tree' : 'blob'}
+	{@const path = repositoryPathInternal(item)}
+	{@const route = isBackup(item) || item.buildStrategy === 'railpack' ? 'tree' : 'blob'}
 	{@const fileUrl =
-		item.repository?.url && path ? toGitRouteUrl(item.repository.url, route, item.branch, path, item.repository.provider) : null}
+		item.repository?.url && path && path !== '.'
+			? toGitRouteUrl(item.repository.url, route, item.branch, path, item.repository.provider)
+			: null}
 	<div class="flex min-w-0 items-center gap-1.5">
 		<FolderIcon class="size-3.5 shrink-0 text-muted-foreground" />
 		{#if !path}
@@ -437,7 +454,7 @@
 			},
 			{
 				label: m.repository_path(),
-				getValue: (item: SyncRow) => (isBackup(item) ? (item.backupDirectory ?? m.common_na()) : item.composePath),
+				getValue: (item: SyncRow) => repositoryPathInternal(item) || m.common_na(),
 				icon: FolderIcon,
 				iconVariant: 'gray' as const,
 				show: mobileFieldVisibility['composePath'] ?? true

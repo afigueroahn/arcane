@@ -103,6 +103,7 @@ const (
 	ActivityTypeAutoUpdate        ActivityType         = "auto_update"
 	ActivityTypeSystemPrune       ActivityType         = "system_prune"
 	ActivityTypeResourceAction    ActivityType         = "resource_action"
+	ActivityTypeGitOpsSync        ActivityType         = "gitops_sync"
 	ActivityMessageLevelInfo      ActivityMessageLevel = "info"
 	ActivityMessageLevelWarning   ActivityMessageLevel = "warning"
 	ActivityMessageLevelError     ActivityMessageLevel = "error"

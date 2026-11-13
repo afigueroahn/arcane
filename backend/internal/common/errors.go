@@ -62,6 +62,12 @@ var (
 			"image patching requires Docker's containerd image store; enable the containerd-snapshotter feature in daemon.json and restart Docker",
 		),
 	)
+	ErrBuildRequiresContainerdImageStore = Classify(
+		ErrBadRequest,
+		errors.New(
+			"building from source with Railpack requires Docker's containerd image store; enable the containerd-snapshotter feature in daemon.json and restart Docker",
+		),
+	)
 	ErrPatchScanReportUnavailable              = Classify(ErrNotFound, errors.New("no stored scan report is available for this scan; re-scan the image or patch without a report"))
 	ErrPatchScanImageMismatch                  = Classify(ErrBadRequest, errors.New("the selected scan does not belong to this image"))
 	ErrContainerComposeManaged                 = Classify(ErrConflict, errors.New("container is managed by a compose project; edit it via the project editor"))

@@ -256,6 +256,13 @@ type (
 		Load            bool              `json:"load"`
 		OutputTruncated bool              `json:"outputTruncated"`
 	}
+
+	RailpackBuildInfo struct {
+		Packages        map[string]string `json:"packages,omitempty" doc:"Package versions Railpack resolved; later builds reuse them"`
+		Image           string            `json:"image" doc:"Image built from the synced commit"`
+		RailpackVersion string            `json:"railpackVersion,omitempty"`
+		Providers       []string          `json:"providers,omitempty" doc:"Railpack providers detected for the app"`
+	}
 )
 
 const (

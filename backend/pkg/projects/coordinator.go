@@ -479,7 +479,7 @@ func ServiceSelected(selected map[string]struct{}, name string) bool {
 func EnsureServiceImage(projectID, projectName, serviceName string, svc composetypes.ServiceConfig) (string, composetypes.ServiceConfig, bool) {
 	imageName := strings.TrimSpace(svc.Image)
 	if imageName == "" {
-		imageName = BuildLocalImageTag(projectID, projectName, serviceName)
+		imageName = LocalImageRepository(projectID, projectName, serviceName) + ":latest"
 		svc.Image = imageName
 		return imageName, svc, true
 	}

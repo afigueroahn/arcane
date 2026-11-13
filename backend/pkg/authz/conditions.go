@@ -53,6 +53,16 @@ var (
 		},
 	}
 
+	// GitOpsRailpackConditions gates configuring a sync that builds images from source.
+	GitOpsRailpackConditions = PermissionConditions{
+		{
+			In:         ConditionInBody,
+			Field:      "railpack",
+			Value:      "true",
+			Permission: PermImagesBuild,
+		},
+	}
+
 	GitOpsSyncModeConditions = PermissionConditions{
 		{
 			In:         ConditionInResource,

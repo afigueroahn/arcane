@@ -24,6 +24,7 @@ import (
 	buildtypes "kit.getarcane.app/builds/types"
 	"kit.getarcane.app/sys/crypto"
 
+	"getarcane.dev/arcane/v3/internal/build/children/railpack"
 	"getarcane.dev/arcane/v3/internal/common"
 	"getarcane.dev/arcane/v3/internal/config"
 	"getarcane.dev/arcane/v3/internal/database"
@@ -43,6 +44,12 @@ type (
 		onBuild    func(buildtypes.BuildRequest)
 		onProgress func(buildtypes.BuildRequest, io.Writer)
 		err        error
+	}
+
+	fakeRailpack struct {
+		preflightErr error
+		build        func(context.Context, railpack.Request, io.Writer) (*types.RailpackBuildInfo, error)
+		preflight    railpack.Target
 	}
 )
 
@@ -686,4 +693,141 @@ func TestAggregateImageBuildsMergesEnvironments(t *testing.T) {
 		assert.Empty(t, body.Data)
 		assert.Len(t, body.FailedEnvironments, 3)
 	})
+}
+
+func TestBuildService_BuildRailpackImage_ReusesExistingImageWithoutHistory(t *testing.T) {
+	svc, db := newRailpackBuildTestService(t, fakeRailpack{
+		preflight: railpack.Target{Platform: "linux/amd64", Exists: true},
+		build: func(context.Context, railpack.Request, io.Writer) (*types.RailpackBuildInfo, error) {
+			t.Fatal("an existing image must not be rebuilt")
+			return nil, nil
+		},
+	})
+	previous := &types.RailpackBuildInfo{Image: "arcane.local/demo-12345678/app:old", Providers: []string{"node"}, Packages: map[string]string{"node": "22.11.0"}}
+
+	info, err := svc.BuildRailpackImage(t.Context(), RailpackBuildOptions{Previous: previous, EnvironmentID: "0", Image: "arcane.local/demo-12345678/app:new"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "arcane.local/demo-12345678/app:new", info.Image)
+	assert.Equal(t, previous.Packages, info.Packages)
+	var count int64
+	require.NoError(t, db.WithContext(t.Context()).Model(&ImageBuild{}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestBuildService_BuildRailpackImage_RecordsHistoryAndPinsPreviousVersions(t *testing.T) {
+	var received railpack.Request
+	svc, db := newRailpackBuildTestService(t, fakeRailpack{
+		preflight: railpack.Target{Platform: "linux/amd64"},
+		build: func(_ context.Context, req railpack.Request, writer io.Writer) (*types.RailpackBuildInfo, error) {
+			received = req
+			_, _ = io.WriteString(writer, "#1 [install] npm ci\n")
+			return &types.RailpackBuildInfo{Image: req.Image, Providers: []string{"node"}}, nil
+		},
+	})
+	opts := RailpackBuildOptions{
+		Previous:      &types.RailpackBuildInfo{Packages: map[string]string{"node": "22.11.0"}},
+		Actor:         &types.Actor{ID: "user-1", Username: "tester"},
+		Env:           map[string]string{"API_KEY": "s3cret"},
+		EnvironmentID: "0",
+		Source:        "https://deploy:token@github.com/acme/app.git#0f1e2d3c:web",
+		ContextDir:    "/data/git/gitops-1/web",
+		Image:         "arcane.local/demo-12345678/app:0f1e2d3c-aa",
+		BuildCommand:  "npm run build",
+		StartCommand:  "node server.js",
+	}
+
+	info, err := svc.BuildRailpackImage(t.Context(), opts)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node"}, info.Providers)
+	assert.Equal(t, map[string]string{"node": "22.11.0"}, received.PreviousVersions)
+	assert.Equal(t, opts.Env, received.Env)
+	assert.Equal(t, "linux/amd64", received.Platform)
+	assert.Equal(t, "node server.js", received.StartCommand)
+
+	var record ImageBuild
+	require.NoError(t, db.WithContext(t.Context()).First(&record).Error)
+	assert.Equal(t, ImageBuildStatusSuccess, record.Status)
+	assert.Equal(t, railpackProvider, record.Provider)
+	assert.Equal(t, []string{opts.Image}, []string(record.Tags))
+	assert.Equal(t, []string{"linux/amd64"}, []string(record.Platforms))
+	assert.NotContains(t, record.ContextDir, "token")
+	require.NotNil(t, record.Output)
+	assert.Contains(t, *record.Output, "npm ci")
+}
+
+func TestBuildService_BuildRailpackImage_FailureRecordsHistoryAndEvent(t *testing.T) {
+	buildErr := errors.New("railpack could not plan the app")
+	svc, db := newRailpackBuildTestService(t, fakeRailpack{
+		build: func(context.Context, railpack.Request, io.Writer) (*types.RailpackBuildInfo, error) {
+			return nil, buildErr
+		},
+	})
+
+	_, err := svc.BuildRailpackImage(t.Context(), RailpackBuildOptions{EnvironmentID: "0", Image: "arcane.local/demo-12345678/app:abc"})
+
+	require.ErrorIs(t, err, buildErr)
+	var record ImageBuild
+	require.NoError(t, db.WithContext(t.Context()).First(&record).Error)
+	assert.Equal(t, ImageBuildStatusFailed, record.Status)
+	var evt event.Event
+	require.NoError(t, db.WithContext(t.Context()).First(&evt, "type = ?", event.EventTypeImageError).Error)
+	assert.Equal(t, railpackProvider, evt.Metadata["provider"])
+}
+
+func TestBuildService_BuildRailpackImage_PreflightFailureWritesNoHistory(t *testing.T) {
+	svc, db := newRailpackBuildTestService(t, fakeRailpack{preflightErr: common.ErrBuildRequiresContainerdImageStore})
+
+	_, err := svc.BuildRailpackImage(t.Context(), RailpackBuildOptions{EnvironmentID: "0", Image: "arcane.local/demo-12345678/app:abc"})
+
+	require.ErrorIs(t, err, common.ErrBuildRequiresContainerdImageStore)
+	var count int64
+	require.NoError(t, db.WithContext(t.Context()).Model(&ImageBuild{}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestBuildService_BuildRailpackImage_TimeoutIsNotADeadlineError(t *testing.T) {
+	svc, _ := newRailpackBuildTestService(t, fakeRailpack{
+		build: func(ctx context.Context, _ railpack.Request, _ io.Writer) (*types.RailpackBuildInfo, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	require.NoError(t, svc.settings.SetIntSetting(t.Context(), "buildTimeout", 1))
+
+	_, err := svc.BuildRailpackImage(t.Context(), RailpackBuildOptions{EnvironmentID: "0", Image: "arcane.local/demo-12345678/app:abc"})
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "timed out after 1s")
+}
+
+func (f fakeRailpack) Preflight(context.Context, string) (railpack.Target, error) {
+	return f.preflight, f.preflightErr
+}
+
+func (f fakeRailpack) Build(ctx context.Context, req railpack.Request, progress io.Writer) (*types.RailpackBuildInfo, error) {
+	return f.build(ctx, req, progress)
+}
+
+func newRailpackBuildTestService(t *testing.T, fake fakeRailpack) (*BuildService, *database.DB) {
+	t.Helper()
+	db, err := setupBuildHistoryTestDB()
+	require.NoError(t, err)
+	settingsService, err := settings.NewSettingsService(settings.SettingsServiceParams{
+		Ctx:    t.Context(),
+		DB:     db,
+		Config: &config.Config{},
+		Env:    settings.Env{},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, settingsService.Stop(context.WithoutCancel(t.Context()))) })
+
+	return &BuildService{
+		db:           db,
+		settings:     settingsService,
+		eventService: event.NewEventService(db, &config.Config{}, nil),
+		railpack:     fake,
+	}, db
 }

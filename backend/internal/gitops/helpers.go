@@ -1,7 +1,9 @@
 package gitops
 
 import (
+	"cmp"
 	"errors"
+	"fmt"
 	"path"
 	"path/filepath"
 	"slices"
@@ -18,6 +20,16 @@ import (
 func validateDeploySource(sync project.GitOpsSync) error {
 	invalid := func(field, message string) error {
 		return common.Classify(common.ErrValidation, &types.FieldError{Field: field, Err: errors.New(message)})
+	}
+	switch cmp.Or(strings.TrimSpace(sync.BuildStrategy), types.GitOpsBuildStrategyCompose) {
+	case types.GitOpsBuildStrategyRailpack:
+		return validateRailpackSource(sync)
+	case types.GitOpsBuildStrategyCompose:
+	default:
+		return invalid("buildStrategy", fmt.Sprintf("Unsupported build strategy %q.", sync.BuildStrategy))
+	}
+	if strings.TrimSpace(sync.ComposePath) == "" {
+		return invalid("composePath", "compose path is required")
 	}
 	if composePath := path.Clean(filepath.ToSlash(strings.TrimSpace(sync.ComposePath))); composePath == ".." || strings.HasPrefix(composePath, "../") {
 		return invalid("composePath", "Compose path must stay inside the repository.")
@@ -41,6 +53,48 @@ func validateDeploySource(sync project.GitOpsSync) error {
 		return invalid("envContent", err.Error())
 	}
 	return nil
+}
+
+// validateRailpackSource keeps a Railpack sync to what its generated single-service project supports.
+func validateRailpackSource(sync project.GitOpsSync) error {
+	invalid := func(field, message string) error {
+		return common.Classify(common.ErrValidation, &types.FieldError{Field: field, Err: errors.New(message)})
+	}
+	sourcePath := path.Clean(filepath.ToSlash(strings.TrimSpace(sync.SourcePath)))
+	switch {
+	case sync.TargetType == "swarm_stack":
+		return invalid("buildStrategy", "Railpack builds deploy to a project, not a swarm stack.")
+	case sync.SyncDirectory:
+		return invalid("syncDirectory", "Railpack builds read the whole repository; turn off \"Sync entire directory\".")
+	case strings.TrimSpace(sync.ComposeOverridePath) != "":
+		return invalid("composeOverridePath", "Railpack builds generate their own compose file and take no override.")
+	case sync.PullImageAfterSync:
+		return invalid("pullImageAfterSync", "Railpack images are built locally and cannot be pulled.")
+	case strings.TrimSpace(kit.FromPtr(sync.PreDeployScriptPath)) != "":
+		return invalid("preDeployScriptPath", "Pre-deploy hooks are not supported for Railpack builds.")
+	case len(sync.SourcePath) > 512:
+		return invalid("sourcePath", "Source directory must be 512 characters or fewer.")
+	case path.IsAbs(sourcePath) || sourcePath == ".." || strings.HasPrefix(sourcePath, "../"):
+		return invalid("sourcePath", "Source directory must be relative to the repository root.")
+	case sync.AppPort < 0 || sync.AppPort > 65535:
+		return invalid("appPort", "App port must be between 1 and 65535, or 0 for the default.")
+	case sync.HostPort < 0 || sync.HostPort > 65535:
+		return invalid("hostPort", "Published port must be between 1 and 65535, or 0 to leave the app unpublished.")
+	case len(sync.BuildCommand) > 4096:
+		return invalid("buildCommand", "Build command must be 4096 characters or fewer.")
+	case len(sync.StartCommand) > 4096:
+		return invalid("startCommand", "Start command must be 4096 characters or fewer.")
+	}
+	if _, err := projects.ParseProjectEnvContent(kit.FromPtr(sync.EnvContent), nil); err != nil {
+		return invalid("envContent", err.Error())
+	}
+	return nil
+}
+
+// hasRailpackConfig reports whether a request configures a Railpack build, which needs images:build.
+func hasRailpackConfig(req types.GitOpsSync) bool {
+	return req.BuildStrategy == types.GitOpsBuildStrategyRailpack ||
+		req.SourcePath != "" || req.BuildCommand != "" || req.StartCommand != "" || req.AppPort != 0 || req.HostPort != 0
 }
 
 func normalizeSyncLimitSetting(value, defaultValue int) int {

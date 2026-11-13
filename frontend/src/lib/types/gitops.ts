@@ -23,6 +23,15 @@ export interface GitRepository {
 
 export type GitOpsSyncMode = 'deploy' | 'backup';
 
+export type GitOpsBuildStrategy = 'compose' | 'railpack';
+
+export interface RailpackBuildInfo {
+	image: string;
+	railpackVersion?: string;
+	providers?: string[];
+	packages?: Record<string, string>;
+}
+
 export type GitOpsBackupState = 'never' | 'pending' | 'backing_up' | 'backed_up' | 'paused' | 'failed' | 'needs_attention';
 
 export type GitOpsBackupFailureReason =
@@ -49,6 +58,13 @@ export interface GitOpsSync {
 	envContent?: string;
 	targetType: string;
 	mode: GitOpsSyncMode;
+	buildStrategy: GitOpsBuildStrategy;
+	sourcePath?: string;
+	buildCommand?: string;
+	startCommand?: string;
+	appPort: number;
+	hostPort: number;
+	railpackInfo?: RailpackBuildInfo;
 	backupDirectory?: string;
 	backupPaths?: string[];
 	backupOnSave: boolean;
@@ -97,6 +113,8 @@ export interface GitOpsSyncResult {
 	message: string;
 	error?: string;
 	syncedAt: string;
+	/** Set when the sync keeps running in the background, as Railpack builds do. */
+	activityId?: string;
 }
 
 export type FileTreeNodeType = 'file' | 'directory';

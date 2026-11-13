@@ -78,7 +78,7 @@
 	import { getStatusVariant, getThemedIconUrl } from '#lib/utils/docker.js';
 	import { environmentName, listScopes } from '#lib/utils/environments.js';
 	import { capitalizeFirstLetter, withOccurrenceKeys } from '#lib/utils/formatting.js';
-	import { gitOpsComposeEditUrl, gitOpsFileEditUrl, gitOpsProjectUrl } from '#lib/utils/gitops.js';
+	import { gitOpsComposeEditUrl, gitOpsFileEditUrl, gitOpsProjectUrl, showGitSyncResultToast } from '#lib/utils/gitops.js';
 	import { toGitRouteUrl, toSafeHref } from '#lib/utils/navigation.js';
 	import { changedFields } from '#lib/utils/payload.js';
 	import { createForm } from '#lib/utils/settings.svelte.js';
@@ -1572,7 +1572,7 @@
 			result: await tryCatch(gitOpsSyncService.performSync(envId, project.gitOpsManagedBy)),
 			message: m.git_sync_failed(),
 			setLoadingState: (value) => (isLoading.syncing = value),
-			onSuccess: async () => {
+			onSuccess: async (syncResult) => {
 				await refreshProjectDetails({
 					forceRebaseDraft: true,
 					preserveEditableDrafts: true,
@@ -1581,7 +1581,7 @@
 				await queryClient.invalidateQueries({
 					queryKey: queryKeys.gitOpsSyncs.all
 				});
-				toast.success(m.git_sync_success());
+				showGitSyncResultToast(syncResult, envId);
 			}
 		});
 	}

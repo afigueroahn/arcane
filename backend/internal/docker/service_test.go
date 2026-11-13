@@ -15,6 +15,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -570,4 +571,21 @@ func newDockerPingTestServerWithHandler(t *testing.T, handler http.HandlerFunc) 
 	t.Cleanup(server.Close)
 
 	return server
+}
+
+func TestUsesContainerdImageStore(t *testing.T) {
+	tests := []struct {
+		name   string
+		status [][2]string
+		want   bool
+	}{
+		{name: "containerd snapshotter", status: [][2]string{{"driver-type", "io.containerd.snapshotter.v1"}}, want: true},
+		{name: "classic overlay2", status: [][2]string{{"Backing Filesystem", "extfs"}, {"Supports d_type", "true"}}, want: false},
+		{name: "no driver status", status: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, UsesContainerdImageStore(system.Info{DriverStatus: tt.status}))
+		})
+	}
 }

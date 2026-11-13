@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
@@ -540,6 +542,14 @@ func CountImageUsage(images []image.Summary, containers []container.Summary, now
 	}
 
 	return counts
+}
+
+// UsesContainerdImageStore reports whether the daemon keeps images in containerd,
+// which BuildKit merge ops and the docker exporter require.
+func UsesContainerdImageStore(info system.Info) bool {
+	return slices.ContainsFunc(info.DriverStatus, func(status [2]string) bool {
+		return status[0] == "driver-type" && status[1] == "io.containerd.snapshotter.v1"
+	})
 }
 
 func (s *DockerClientService) GetAllNetworks(ctx context.Context) ([]network.Summary, int, int, int, error) {

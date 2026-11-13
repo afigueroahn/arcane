@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/url"
@@ -28,8 +29,11 @@ import (
 	"kit.getarcane.app"
 	"kit.getarcane.app/acfs"
 	"kit.getarcane.app/concurrency"
+	dockertypes "kit.getarcane.app/docker/types"
 	"kit.getarcane.app/mapping"
 
+	"getarcane.dev/arcane/v3/internal/activity"
+	"getarcane.dev/arcane/v3/internal/build"
 	"getarcane.dev/arcane/v3/internal/common"
 	"getarcane.dev/arcane/v3/internal/database"
 	"getarcane.dev/arcane/v3/internal/event"
@@ -43,6 +47,7 @@ import (
 	"getarcane.dev/arcane/v3/internal/scheduler/runs"
 	"getarcane.dev/arcane/v3/internal/settings"
 	"getarcane.dev/arcane/v3/internal/swarm"
+	activitylib "getarcane.dev/arcane/v3/pkg/activity"
 	"getarcane.dev/arcane/v3/pkg/gitutil"
 	"getarcane.dev/arcane/v3/pkg/handlerutil"
 	"getarcane.dev/arcane/v3/pkg/httpx"
@@ -61,6 +66,7 @@ type (
 		swarmService    *swarm.SwarmService
 		eventService    *event.EventService
 		settingsService *settings.SettingsService
+		activityService *activity.ActivityService
 
 		jobs         *entityjobs.Registry
 		engine       *flow.Engine
@@ -69,6 +75,15 @@ type (
 		backups *backupRuntime
 		sync    *gitopssync.Service
 		backup  *backup.Service
+
+		// backgroundSyncs maps a sync running in the background to its activity ID.
+		backgroundSyncs map[string]string
+		backgroundMu    sync.Mutex
+	}
+
+	// RailpackBuilder builds app source that has no Dockerfile; build.BuildService provides it.
+	RailpackBuilder interface {
+		BuildRailpackImage(ctx context.Context, opts build.RailpackBuildOptions) (*types.RailpackBuildInfo, error)
 	}
 	syncTarget struct {
 		EnvironmentID string `json:"environmentId"`
@@ -100,6 +115,8 @@ type (
 		SwarmService    *swarm.SwarmService
 		EventService    *event.EventService
 		SettingsService *settings.SettingsService
+		ActivityService *activity.ActivityService
+		RailpackBuilder RailpackBuilder
 		Ctx             context.Context
 		Scheduler       types.DynamicScheduler
 		Admission       *runs.Admission
@@ -220,6 +237,8 @@ func NewGitOpsSyncService(p GitOpsSyncServiceParams) *GitOpsSyncService {
 		swarmService:    p.SwarmService,
 		eventService:    p.EventService,
 		settingsService: p.SettingsService,
+		activityService: p.ActivityService,
+		backgroundSyncs: map[string]string{},
 		jobs: entityjobs.New(entityjobs.Config{
 			Lifecycle:      p.Ctx,
 			Scheduler:      p.Scheduler,
@@ -249,6 +268,7 @@ func NewGitOpsSyncService(p GitOpsSyncServiceParams) *GitOpsSyncService {
 		ProjectService: p.ProjectService,
 		SwarmService:   p.SwarmService,
 		EventService:   p.EventService,
+		Builder:        p.RailpackBuilder,
 		Limits:         s.getEffectiveSyncLimits,
 		LogError:       logError,
 		UnregisterJob:  s.jobs.Unregister,
@@ -512,6 +532,7 @@ func (s *GitOpsSyncService) CreateSync(ctx context.Context, environmentID string
 	slog.InfoContext(ctx, "Creating GitOps sync", "environmentId", environmentID, "name", change.Request.Name, "repositoryId", change.Request.RepositoryID)
 
 	mode := cmp.Or(strings.TrimSpace(change.Request.Mode), types.GitOpsSyncModeDeploy)
+	strategy := cmp.Or(strings.TrimSpace(change.Request.BuildStrategy), types.GitOpsBuildStrategyCompose)
 	switch {
 	case strings.TrimSpace(change.Request.Name) == "":
 		return nil, common.Classify(common.ErrValidation, &types.FieldError{Field: "name", Err: errors.New("name is required")})
@@ -527,10 +548,10 @@ func (s *GitOpsSyncService) CreateSync(ctx context.Context, environmentID string
 		(change.Request.TargetType != "" && change.Request.TargetType != "project" ||
 			change.Request.SyncDirectory || change.Request.PullImageAfterSync || change.Request.RedeployAfterSync ||
 			change.Submitted["composeOverridePath"] || change.Submitted["envContent"] ||
-			hasPreDeployConfig(change.Submitted)):
+			hasPreDeployConfig(change.Submitted) || hasRailpackConfig(change.Request)):
 		return nil, common.Classify(common.ErrValidation, &types.FieldError{Field: "mode", Err: errors.New("deployment options cannot be set on a backup sync")})
-	case mode == types.GitOpsSyncModeDeploy && strings.TrimSpace(change.Request.ComposePath) == "":
-		return nil, common.Classify(common.ErrValidation, &types.FieldError{Field: "composePath", Err: errors.New("compose path is required")})
+	case strategy == types.GitOpsBuildStrategyRailpack && strings.TrimSpace(kit.FromPtr(change.Request.ProjectID)) != "":
+		return nil, common.Classify(common.ErrValidation, &types.FieldError{Field: "projectId", Err: errors.New("railpack builds create their own project; an existing project cannot be linked")})
 	}
 	if err := validateSwarmStackName(change.Request.TargetType, cmp.Or(change.Request.ProjectName, change.Request.Name)); err != nil {
 		return nil, err
@@ -562,21 +583,28 @@ func (s *GitOpsSyncService) CreateSync(ctx context.Context, environmentID string
 
 	defaultMaxFiles, defaultMaxTotalSize, defaultMaxBinarySize := s.getEnvironmentSyncLimits(ctx)
 	syncRecord := projectpkg.GitOpsSync{
-		Name:                 change.Request.Name,
-		EnvironmentID:        environmentID,
-		RepositoryID:         change.Request.RepositoryID,
-		Branch:               change.Request.Branch,
-		ComposePath:          change.Request.ComposePath,
-		ComposeOverridePath:  strings.TrimSpace(change.Request.ComposeOverridePath),
-		EnvContent:           nullableTrimmedString(change.Request.EnvContent),
-		TargetType:           change.Request.TargetType,
-		ProjectName:          cmp.Or(change.Request.ProjectName, change.Request.Name),
-		Mode:                 mode,
-		AutoSync:             change.Request.AutoSync,
-		SyncInterval:         kit.Ternary(change.Submitted["syncInterval"], change.Request.SyncInterval, 60),
-		SyncDirectory:        change.Request.SyncDirectory,
-		PullImageAfterSync:   change.Request.PullImageAfterSync,
-		RedeployAfterSync:    change.Request.RedeployAfterSync,
+		Name:                change.Request.Name,
+		EnvironmentID:       environmentID,
+		RepositoryID:        change.Request.RepositoryID,
+		Branch:              change.Request.Branch,
+		ComposePath:         change.Request.ComposePath,
+		ComposeOverridePath: strings.TrimSpace(change.Request.ComposeOverridePath),
+		EnvContent:          nullableTrimmedString(change.Request.EnvContent),
+		TargetType:          change.Request.TargetType,
+		ProjectName:         cmp.Or(change.Request.ProjectName, change.Request.Name),
+		Mode:                mode,
+		AutoSync:            change.Request.AutoSync,
+		SyncInterval:        kit.Ternary(change.Submitted["syncInterval"], change.Request.SyncInterval, 60),
+		SyncDirectory:       change.Request.SyncDirectory,
+		PullImageAfterSync:  change.Request.PullImageAfterSync,
+		// A Railpack sync exists to deploy the app it builds, so its first sync deploys unless told otherwise.
+		RedeployAfterSync:    change.Request.RedeployAfterSync || (strategy == types.GitOpsBuildStrategyRailpack && !change.Submitted["redeployAfterSync"]),
+		BuildStrategy:        strategy,
+		SourcePath:           strings.TrimSpace(change.Request.SourcePath),
+		BuildCommand:         strings.TrimSpace(change.Request.BuildCommand),
+		StartCommand:         strings.TrimSpace(change.Request.StartCommand),
+		AppPort:              change.Request.AppPort,
+		HostPort:             change.Request.HostPort,
 		MaxSyncFiles:         kit.Ternary(change.Submitted["maxSyncFiles"], change.Request.MaxSyncFiles, defaultMaxFiles),
 		MaxSyncTotalSize:     kit.Ternary(change.Submitted["maxSyncTotalSize"], change.Request.MaxSyncTotalSize, defaultMaxTotalSize),
 		MaxSyncBinarySize:    kit.Ternary(change.Submitted["maxSyncBinarySize"], change.Request.MaxSyncBinarySize, defaultMaxBinarySize),
@@ -620,7 +648,7 @@ func (s *GitOpsSyncService) CreateSync(ctx context.Context, environmentID string
 	})
 
 	// The sync exists even when its first run fails, so that failure can be retried rather than failing creation.
-	if _, syncErr := s.PerformSync(ctx, SyncRequest{
+	if _, syncErr := s.StartSync(ctx, SyncRequest{
 		EnvironmentID: syncRecord.EnvironmentID,
 		SyncID:        syncRecord.ID,
 		Actor:         change.Actor,
@@ -712,7 +740,8 @@ func (s *GitOpsSyncService) UpdateSync(ctx context.Context, environmentID, id st
 			change.Request.SyncDirectory ||
 			change.Request.PullImageAfterSync ||
 			change.Request.RedeployAfterSync ||
-			hasPreDeployConfig(change.Submitted)):
+			hasPreDeployConfig(change.Submitted) ||
+			hasRailpackConfig(change.Request)):
 		return nil, common.Classify(common.ErrValidation, &types.FieldError{Field: "mode", Err: errors.New("deployment options cannot be set on a backup sync")})
 	}
 	// Only checked when the name or target changes, so unrelated edits to an existing sync still save.
@@ -745,6 +774,14 @@ func (s *GitOpsSyncService) UpdateSync(ctx context.Context, environmentID, id st
 			EnvContent:          kit.Ternary(change.Submitted["envContent"], change.Request.EnvContent, syncRecord.EnvContent),
 			TargetType:          kit.Ternary(change.Submitted["targetType"], change.Request.TargetType, syncRecord.TargetType),
 			SyncDirectory:       kit.Ternary(change.Submitted["syncDirectory"], change.Request.SyncDirectory, syncRecord.SyncDirectory),
+			PullImageAfterSync:  kit.Ternary(change.Submitted["pullImageAfterSync"], change.Request.PullImageAfterSync, syncRecord.PullImageAfterSync),
+			PreDeployScriptPath: kit.Ternary(change.Submitted["preDeployScriptPath"], change.Request.PreDeployScriptPath, syncRecord.PreDeployScriptPath),
+			BuildStrategy:       kit.Ternary(change.Submitted["buildStrategy"], change.Request.BuildStrategy, syncRecord.BuildStrategy),
+			SourcePath:          kit.Ternary(change.Submitted["sourcePath"], change.Request.SourcePath, syncRecord.SourcePath),
+			BuildCommand:        kit.Ternary(change.Submitted["buildCommand"], change.Request.BuildCommand, syncRecord.BuildCommand),
+			StartCommand:        kit.Ternary(change.Submitted["startCommand"], change.Request.StartCommand, syncRecord.StartCommand),
+			AppPort:             kit.Ternary(change.Submitted["appPort"], change.Request.AppPort, syncRecord.AppPort),
+			HostPort:            kit.Ternary(change.Submitted["hostPort"], change.Request.HostPort, syncRecord.HostPort),
 		}); sourceErr != nil {
 			return nil, sourceErr
 		}
@@ -777,6 +814,12 @@ func (s *GitOpsSyncService) UpdateSync(ctx context.Context, environmentID, id st
 		"maxSyncFiles":        {column: "max_sync_files", value: change.Request.MaxSyncFiles},
 		"maxSyncTotalSize":    {column: "max_sync_total_size", value: change.Request.MaxSyncTotalSize},
 		"maxSyncBinarySize":   {column: "max_sync_binary_size", value: change.Request.MaxSyncBinarySize},
+		"buildStrategy":       {column: "build_strategy", value: cmp.Or(strings.TrimSpace(change.Request.BuildStrategy), types.GitOpsBuildStrategyCompose)},
+		"sourcePath":          {column: "source_path", value: strings.TrimSpace(change.Request.SourcePath)},
+		"buildCommand":        {column: "build_command", value: strings.TrimSpace(change.Request.BuildCommand)},
+		"startCommand":        {column: "start_command", value: strings.TrimSpace(change.Request.StartCommand)},
+		"appPort":             {column: "app_port", value: change.Request.AppPort},
+		"hostPort":            {column: "host_port", value: change.Request.HostPort},
 	} {
 		if change.Submitted[field] {
 			updates[update.column] = update.value
@@ -964,6 +1007,74 @@ func (s *GitOpsSyncService) PerformSync(ctx context.Context, req SyncRequest) (s
 	}
 
 	return s.sync.Run(ctx, defaultGitSyncTimeout, syncRecord, req.Actor, result)
+}
+
+// StartSync runs a sync. A Railpack build can outlast any request, so that sync continues in the
+// background under an activity whose ID the result carries; a second start joins the running one.
+func (s *GitOpsSyncService) StartSync(ctx context.Context, req SyncRequest) (*types.GitOpsSyncResult, error) {
+	syncRecord, err := s.GetSyncByID(ctx, req.EnvironmentID, req.SyncID)
+	if err != nil {
+		return nil, err
+	}
+	if syncRecord.Mode == types.GitOpsSyncModeBackup || syncRecord.BuildStrategy != types.GitOpsBuildStrategyRailpack {
+		return s.PerformSync(ctx, req)
+	}
+
+	activityID, started := s.beginBackgroundSync(ctx, syncRecord, req.Actor)
+	if started {
+		runCtx := s.activityService.Track(activitylib.ActivityRuntimeContext(ctx, s.jobs.Context()), activityID)
+		go s.runBackgroundSync(runCtx, req, activityID)
+	}
+	return &types.GitOpsSyncResult{
+		SyncedAt:   time.Now(),
+		ActivityID: kit.Ternary(activityID == "", nil, &activityID),
+		Message:    fmt.Sprintf("Building and deploying '%s' in the background", syncRecord.Name),
+		Success:    true,
+	}, nil
+}
+
+func (s *GitOpsSyncService) beginBackgroundSync(ctx context.Context, syncRecord *projectpkg.GitOpsSync, actor types.Actor) (string, bool) {
+	s.backgroundMu.Lock()
+	defer s.backgroundMu.Unlock()
+
+	if activityID, running := s.backgroundSyncs[syncRecord.ID]; running {
+		return activityID, false
+	}
+	started, err := s.activityService.StartActivity(ctx, activity.StartActivityRequest{
+		EnvironmentID: syncRecord.EnvironmentID,
+		Type:          types.ActivityTypeGitOpsSync,
+		ResourceType:  new("git_sync"),
+		ResourceID:    new(syncRecord.ID),
+		ResourceName:  new(syncRecord.Name),
+		StartedBy:     &actor,
+		Step:          "Building from source",
+		LatestMessage: "Git sync started",
+		Metadata:      database.JSON{"syncId": syncRecord.ID, "buildStrategy": syncRecord.BuildStrategy},
+	})
+	if err != nil {
+		slog.DebugContext(ctx, "failed to start git sync activity", "syncId", syncRecord.ID, "error", err)
+	}
+	activityID := kit.Ternary(err != nil, "", kit.FromPtr(started).ID)
+	s.backgroundSyncs[syncRecord.ID] = activityID
+	return activityID, true
+}
+
+func (s *GitOpsSyncService) runBackgroundSync(ctx context.Context, req SyncRequest, activityID string) {
+	defer func() {
+		s.backgroundMu.Lock()
+		defer s.backgroundMu.Unlock()
+		delete(s.backgroundSyncs, req.SyncID)
+	}()
+
+	writer := activitylib.NewWriter(ctx, activitylib.WriterOptions{
+		Service:     s.activityService,
+		ActivityID:  activityID,
+		Output:      io.Discard,
+		DefaultStep: "Building and deploying",
+	})
+	result, err := s.PerformSync(context.WithValue(ctx, dockertypes.ProgressWriterKey{}, writer), req)
+	activitylib.FlushWriter(writer)
+	activitylib.CompleteHandlerActivity(ctx, s.activityService, activityID, kit.FromPtr(result).Message, err)
 }
 
 func (s *GitOpsSyncService) GetSyncStatus(ctx context.Context, environmentID, id string) (*types.GitOpsSyncStatus, error) {

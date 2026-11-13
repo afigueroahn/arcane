@@ -99,15 +99,16 @@ func BuildPlatformsFromCompose(svc composetypes.ServiceConfig) []string {
 	return platforms
 }
 
-func BuildLocalImageTag(projectID, projectName, serviceName string) string {
-	shortID := strings.TrimSpace(projectID)
+// LocalImageRepository names the untagged arcane.local repository for an image Arcane builds itself.
+func LocalImageRepository(ownerID, ownerName, serviceName string) string {
+	shortID := strings.TrimSpace(ownerID)
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
-	projectPart := cmp.Or(SanitizeImageComponent(projectName), "project")
+	ownerPart := cmp.Or(SanitizeImageComponent(ownerName), "project")
 	servicePart := cmp.Or(SanitizeImageComponent(serviceName), "service")
 
-	return fmt.Sprintf("%s/%s-%s/%s:latest", imageref.LocalBuildRegistry, projectPart, shortID, servicePart)
+	return fmt.Sprintf("%s/%s-%s/%s", imageref.LocalBuildRegistry, ownerPart, shortID, servicePart)
 }
 
 func SanitizeImageComponent(value string) string {

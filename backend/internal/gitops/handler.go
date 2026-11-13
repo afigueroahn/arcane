@@ -169,6 +169,9 @@ func (h *GitOpsSyncHandler) CreateSync(ctx context.Context, input *CreateGitOpsS
 	if backupErr := requireConditionPermissions(ctx, input.EnvironmentID, authz.GitOpsModeConditions, "mode", input.Body.Mode); backupErr != nil {
 		return nil, backupErr
 	}
+	if railpackErr := requireConditionPermissions(ctx, input.EnvironmentID, authz.GitOpsRailpackConditions, "railpack", strconv.FormatBool(hasRailpackConfig(input.Body))); railpackErr != nil {
+		return nil, railpackErr
+	}
 
 	sync, err := h.syncService.CreateSync(ctx, input.EnvironmentID, SyncUpdate{
 		Request:   input.Body,
@@ -244,6 +247,9 @@ func (h *GitOpsSyncHandler) UpdateSync(ctx context.Context, input *UpdateGitOpsS
 	if backupErr := h.requireBackupSyncPermission(ctx, input.EnvironmentID, input.SyncID); backupErr != nil {
 		return nil, backupErr
 	}
+	if railpackErr := requireConditionPermissions(ctx, input.EnvironmentID, authz.GitOpsRailpackConditions, "railpack", strconv.FormatBool(hasRailpackConfig(input.Body))); railpackErr != nil {
+		return nil, railpackErr
+	}
 
 	sync, err := h.syncService.UpdateSync(ctx, input.EnvironmentID, input.SyncID, SyncUpdate{
 		Request:   input.Body,
@@ -290,7 +296,7 @@ func (h *GitOpsSyncHandler) PerformSync(ctx context.Context, input *GitOpsSyncAc
 	}
 	actor := handlerutil.CurrentActor(ctx)
 
-	result, err := h.syncService.PerformSync(ctx, SyncRequest{
+	result, err := h.syncService.StartSync(ctx, SyncRequest{
 		EnvironmentID: input.EnvironmentID,
 		SyncID:        input.SyncID,
 		Actor:         actor,

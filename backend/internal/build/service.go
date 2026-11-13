@@ -29,6 +29,7 @@ import (
 	"kit.getarcane.app/docker"
 	gitkit "kit.getarcane.app/git"
 
+	"getarcane.dev/arcane/v3/internal/build/children/railpack"
 	"getarcane.dev/arcane/v3/internal/build/children/workspace"
 	"getarcane.dev/arcane/v3/internal/common"
 	"getarcane.dev/arcane/v3/internal/database"
@@ -43,6 +44,7 @@ import (
 	"getarcane.dev/arcane/v3/pkg/handlerutil"
 	"getarcane.dev/arcane/v3/pkg/httpx"
 	"getarcane.dev/arcane/v3/pkg/pagination"
+	"getarcane.dev/arcane/v3/pkg/timeouts"
 	"getarcane.dev/types/v3"
 )
 
@@ -56,6 +58,7 @@ type (
 		eventService    *event.EventService
 		workspace       *workspace.Service
 		builder         buildtypes.Builder
+		railpack        railpackBuilder
 		gitProbeFn      func(context.Context, string, git.AuthConfig) error
 		gitCloneFn      func(context.Context, string, string, git.AuthConfig, int) (string, error)
 		gitCleanupFn    func(string) error
@@ -71,11 +74,43 @@ type (
 		GitRepository   *gitrepo.GitRepositoryService
 		EventService    *event.EventService
 	}
+
+	// RailpackBuildOptions describes a Railpack build of app source that has no Dockerfile.
+	RailpackBuildOptions struct {
+		// Previous is the last build's info; its package versions pin this build.
+		Previous *types.RailpackBuildInfo
+		Actor    *types.Actor
+		Progress io.Writer
+		// Env is passed to Railpack (RAILPACK_* settings) and mounted as build secrets.
+		Env           map[string]string
+		EnvironmentID string
+		// Source identifies the repository revision in build history.
+		Source       string
+		ContextDir   string
+		Image        string
+		BuildCommand string
+		StartCommand string
+	}
+
+	railpackBuilder interface {
+		Preflight(ctx context.Context, image string) (railpack.Target, error)
+		Build(ctx context.Context, req railpack.Request, progress io.Writer) (*types.RailpackBuildInfo, error)
+	}
+
+	recordedBuild struct {
+		user          *types.Actor
+		progress      io.Writer
+		build         func(io.Writer) (*buildtypes.BuildResult, error)
+		environmentID string
+		serviceName   string
+		req           buildtypes.BuildRequest
+	}
 )
 
 const (
 	buildHistoryOutputLimitBytes = 2 * 1024 * 1024
 	deleteBuildsBatchSize        = 500
+	railpackProvider             = "railpack"
 )
 
 func NewBuildService(p BuildServiceParams) (*BuildService, error) {
@@ -90,6 +125,7 @@ func NewBuildService(p BuildServiceParams) (*BuildService, error) {
 		gitCloneFn:      p.GitRepository.Clone,
 		gitCleanupFn:    os.RemoveAll,
 		workspace:       workspace.NewService(p.LocalSettings),
+		railpack:        railpack.NewService(p.DockerService),
 	}
 
 	// registry.ContainerRegistryService already implements buildtypes.RegistryAuthProvider,
@@ -137,19 +173,96 @@ func (
 		}
 	}
 
+	return s.recordBuild(ctx, recordedBuild{
+		user:          user,
+		progress:      progressWriter,
+		environmentID: environmentID,
+		serviceName:   serviceName,
+		req:           req,
+		build: func(writer io.Writer) (*buildtypes.BuildResult, error) {
+			resolvedReq, cleanup, err := s.resolveBuildRequest(ctx, req, writer, serviceName)
+			if err != nil {
+				return nil, err
+			}
+			defer func() {
+				if cleanupErr := cleanup(); cleanupErr != nil {
+					slog.WarnContext(ctx, "failed to cleanup temporary git build context", "error", cleanupErr)
+				}
+			}()
+			return s.builder.BuildImage(ctx, resolvedReq, writer, serviceName)
+		},
+	})
+}
+
+// BuildRailpackImage builds opts.ContextDir into opts.Image with Railpack, reusing the image when it already exists.
+func (s *BuildService) BuildRailpackImage(ctx context.Context, opts RailpackBuildOptions) (*types.RailpackBuildInfo, error) {
+	target, err := s.railpack.Preflight(ctx, opts.Image)
+	if err != nil {
+		return nil, err
+	}
+	if target.Exists {
+		// The tag names the commit and build inputs, so the existing image is this build.
+		reused := kit.FromPtr(opts.Previous)
+		reused.Image = opts.Image
+		writeBuildProgressStatus(ctx, opts.Progress, "", "reusing existing image "+opts.Image)
+		return &reused, nil
+	}
+
+	timeout := timeouts.GetDuration(s.BuildSettings().BuildTimeoutSecs, timeouts.DefaultBuildTimeout)
+	buildCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var info *types.RailpackBuildInfo
+	_, err = s.recordBuild(ctx, recordedBuild{
+		user:          opts.Actor,
+		progress:      opts.Progress,
+		environmentID: opts.EnvironmentID,
+		req: buildtypes.BuildRequest{
+			Provider:   railpackProvider,
+			ContextDir: sanitizeBuildContextForEvent(opts.Source),
+			Tags:       []string{opts.Image},
+			Platforms:  []string{target.Platform},
+			Load:       true,
+		},
+		build: func(writer io.Writer) (*buildtypes.BuildResult, error) {
+			built, buildErr := s.railpack.Build(buildCtx, railpack.Request{
+				Env:              opts.Env,
+				PreviousVersions: kit.FromPtr(opts.Previous).Packages,
+				ContextDir:       opts.ContextDir,
+				Image:            opts.Image,
+				Platform:         target.Platform,
+				BuildCommand:     opts.BuildCommand,
+				StartCommand:     opts.StartCommand,
+			}, writer)
+			if buildErr != nil && buildCtx.Err() != nil && ctx.Err() == nil {
+				// The flow engine retries deadline errors; a build that outran the timeout would only time out again.
+				return nil, fmt.Errorf("railpack build timed out after %s", timeout)
+			}
+			if buildErr != nil {
+				return nil, buildErr
+			}
+			info = built
+			return &buildtypes.BuildResult{Provider: railpackProvider, Tags: []string{opts.Image}}, nil
+		},
+	})
+	return info, err
+}
+
+// recordBuild runs a build with its output captured, then records it in build history and publishes the outcome.
+func (s *BuildService) recordBuild(ctx context.Context, run recordedBuild) (*buildtypes.BuildResult, error) {
 	// The builder emits raw docker-CLI text. The log capture stores it verbatim
 	// for build history; the progress writer gets it framed as {"log":...} lines.
 	logCapture := capture.New(buildHistoryOutputLimitBytes)
 	writer := io.Writer(logCapture)
 	var logWriter io.WriteCloser
-	if progressWriter != nil {
-		logWriter = docker.NewLogLineWriter(progressWriter)
+	if run.progress != nil {
+		logWriter = docker.NewLogLineWriter(run.progress)
 		writer = io.MultiWriter(logWriter, logCapture)
 	}
 
 	buildRecordID := ""
-	if strings.TrimSpace(environmentID) != "" {
-		if record, err := s.createBuildRecord(ctx, environmentID, req, user); err != nil {
+	if strings.TrimSpace(run.environmentID) != "" {
+		if record, err := s.createBuildRecord(ctx, run.environmentID, run.req, run.user); err != nil {
 			slog.WarnContext(ctx, "failed to create build history record", "error", err)
 		} else {
 			buildRecordID = record.ID
@@ -157,24 +270,7 @@ func (
 	}
 
 	startedAt := time.Now()
-	cleanupResolvedContext := func() error { return nil }
-	defer func() {
-		if cleanupErr := cleanupResolvedContext(); cleanupErr != nil {
-			slog.WarnContext(ctx, "failed to cleanup temporary git build context", "error", cleanupErr)
-		}
-	}()
-	var (
-		result *buildtypes.BuildResult
-		err    error
-	)
-
-	if resolvedReq, cleanupFn, resolveErr := s.resolveBuildRequest(ctx, req, writer, serviceName); resolveErr != nil {
-		err = resolveErr
-	} else {
-		cleanupResolvedContext = cleanupFn
-		result, err = s.builder.BuildImage(ctx, resolvedReq, writer, serviceName)
-	}
-
+	result, err := run.build(writer)
 	completedAt := time.Now()
 	if logWriter != nil {
 		_ = logWriter.Close()
@@ -187,7 +283,7 @@ func (
 			outputPtr = &output
 		}
 
-		provider := s.effectiveBuildProvider(req.Provider)
+		provider := s.effectiveBuildProvider(run.req.Provider)
 		var digest *string
 		if result != nil {
 			if result.Provider != "" {
@@ -224,10 +320,10 @@ func (
 			slog.WarnContext(ctx, "failed to update build history record", "error", updateErr)
 		}
 	}
-	s.eventService.PublishChange(environmentID, "build")
+	s.eventService.PublishChange(run.environmentID, "build")
 
 	if err != nil {
-		s.logBuildFailureEvent(ctx, environmentID, req, serviceName, buildRecordID, err, user)
+		s.logBuildFailureEvent(ctx, run.environmentID, run.req, run.serviceName, buildRecordID, err, run.user)
 	}
 
 	return result, err

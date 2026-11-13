@@ -100,15 +100,18 @@
 		</div>
 	</div>
 
-	<IfPermitted perm="images:build" envId={environmentId}>
-		<div>
-			<ArcaneButton
-				action="base"
-				tone="outline-primary"
-				icon={RedeployIcon}
-				customLabel={m.build_rebuild()}
-				onclick={onRebuild}
-			/>
-		</div>
-	</IfPermitted>
+	<!-- Railpack builds come from a Git sync and rebuild by syncing it again. -->
+	{#if build.provider !== 'railpack'}
+		<IfPermitted perm="images:build" envId={environmentId}>
+			<div>
+				<ArcaneButton
+					action="base"
+					tone="outline-primary"
+					icon={RedeployIcon}
+					customLabel={m.build_rebuild()}
+					onclick={onRebuild}
+				/>
+			</div>
+		</IfPermitted>
+	{/if}
 </aside>

@@ -58,3 +58,20 @@ func TestBuildImageRefsFromComposeProject_UsesMergedComposeOverrides(t *testing.
 
 	assert.Equal(t, []string{"overridden-app:latest"}, BuildImageRefsFromComposeProject(project))
 }
+
+func TestPullableImageRefs_SkipsNeverPullServices(t *testing.T) {
+	project := &composetypes.Project{
+		Name: "demo",
+		Services: composetypes.Services{
+			"db": {Name: "db", Image: "postgres:17"},
+			"app": {
+				Name:       "app",
+				Image:      "arcane.local/demo-12345678/app:abc123",
+				PullPolicy: composetypes.PullPolicyNever,
+				Volumes:    []composetypes.ServiceVolumeConfig{{Type: composetypes.VolumeTypeImage, Source: "busybox:1"}},
+			},
+		},
+	}
+
+	assert.ElementsMatch(t, []string{"postgres:17", "busybox:1"}, PullableImageRefs(project))
+}

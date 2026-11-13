@@ -65,7 +65,9 @@ func RegisterGitOpsSyncs(api huma.API, syncService *GitOpsSyncService) {
 			Summary:     "Create a GitOps sync",
 			Description: "Create a new GitOps sync configuration for an environment",
 			Tags:        []string{"GitOps Syncs"},
-			Metadata:    map[string]any{authz.MetaPermissionConditions: slices.Concat(authz.GitOpsPreDeployConditions, authz.GitOpsModeConditions)},
+			Metadata: map[string]any{
+				authz.MetaPermissionConditions: slices.Concat(authz.GitOpsPreDeployConditions, authz.GitOpsModeConditions, authz.GitOpsRailpackConditions),
+			},
 		},
 		authz.PermGitOpsCreate,
 		h.CreateSync,
@@ -94,7 +96,9 @@ func RegisterGitOpsSyncs(api huma.API, syncService *GitOpsSyncService) {
 			Summary:     "Update a GitOps sync",
 			Description: "Update an existing GitOps sync configuration",
 			Tags:        []string{"GitOps Syncs"},
-			Metadata:    map[string]any{authz.MetaPermissionConditions: slices.Concat(authz.GitOpsPreDeployConditions, authz.GitOpsSyncModeConditions)},
+			Metadata: map[string]any{
+				authz.MetaPermissionConditions: slices.Concat(authz.GitOpsPreDeployConditions, authz.GitOpsSyncModeConditions, authz.GitOpsRailpackConditions),
+			},
 		},
 		authz.PermGitOpsUpdate,
 		h.UpdateSync,

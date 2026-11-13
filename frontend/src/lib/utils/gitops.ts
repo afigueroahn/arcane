@@ -1,7 +1,16 @@
-import type { GitOpsSync } from '#lib/types/gitops.js';
+import { toast } from 'svelte-sonner';
+
+import { m } from '#lib/paraglide/messages.js';
+import type { GitOpsSync, GitOpsSyncResult } from '#lib/types/gitops.js';
+import { activityToastOptions } from '#lib/utils/activity-toast.js';
 import { toGitRouteUrl, toGitWebUrl } from '#lib/utils/navigation.js';
 
+function isRailpackSync(sync: GitOpsSync): boolean {
+	return sync.buildStrategy === 'railpack';
+}
+
 function composeDirectory(sync: GitOpsSync): string {
+	if (isRailpackSync(sync)) return sync.sourcePath ?? '';
 	return sync.composePath.split('/').slice(0, -1).join('/');
 }
 
@@ -24,13 +33,14 @@ export function gitOpsProjectUrl(sync: GitOpsSync | undefined | null): string | 
 	);
 }
 
+// A Railpack sync generates its compose file, so there is no repository file to edit.
 export function gitOpsComposeEditUrl(sync: GitOpsSync | undefined | null): string | null {
-	if (!sync?.repository?.url) return null;
+	if (!sync?.repository?.url || isRailpackSync(sync)) return null;
 	return toGitRouteUrl(sync.repository.url, 'edit', sync.branch, sync.composePath, sync.repository.provider);
 }
 
 export function gitOpsFileEditUrl(sync: GitOpsSync | undefined | null, relativePath: string): string | null {
-	if (!sync?.repository?.url || !syncedPaths(sync).includes(relativePath)) return null;
+	if (!sync?.repository?.url || isRailpackSync(sync) || !syncedPaths(sync).includes(relativePath)) return null;
 	const directory = composeDirectory(sync);
 	return toGitRouteUrl(
 		sync.repository.url,
@@ -39,4 +49,16 @@ export function gitOpsFileEditUrl(sync: GitOpsSync | undefined | null, relativeP
 		directory ? `${directory}/${relativePath}` : relativePath,
 		sync.repository.provider
 	);
+}
+
+// A sync that builds from source only starts here; its completion arrives later through the activity.
+export function showGitSyncResultToast(result: GitOpsSyncResult, environmentId: string) {
+	if (result.activityId) {
+		toast.success(m.railpack_build_started(), {
+			description: m.railpack_build_started_description(),
+			...activityToastOptions(result.activityId, false, environmentId)
+		});
+		return;
+	}
+	toast.success(m.git_sync_success());
 }

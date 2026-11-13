@@ -3,7 +3,10 @@ package api
 import (
 	"bytes"
 	"encoding/json/jsontext"
+	"errors"
+	"io/fs"
 	"net/http"
+	"os"
 	"reflect"
 	"regexp"
 	"sort"
@@ -462,4 +465,16 @@ func TestSchemaRegistry_RawJSONIsUntyped(t *testing.T) {
 	schema := registry.Schema(reflect.TypeFor[jsontext.Value](), true, "")
 	require.Empty(t, schema.Type)
 	require.Empty(t, schema.ContentEncoding)
+}
+
+func TestSetupAPIForSpec_MatchesFrontendSpec(t *testing.T) {
+	committed, err := os.ReadFile("../../frontend/openapi.yaml")
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Skip("frontend/openapi.yaml is not part of this checkout")
+	}
+	require.NoError(t, err)
+
+	generated, err := SetupAPIForSpec().OpenAPI().YAML()
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(committed, generated), "frontend/openapi.yaml is stale; run `just generate openapi`")
 }

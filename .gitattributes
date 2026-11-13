@@ -5,3 +5,5 @@
 .husky/_/* text eol=lf
 Justfile text eol=lf
 *.sh text eol=lf
+# Compared byte for byte against the backend's generated spec.
+frontend/openapi.yaml text eol=lf

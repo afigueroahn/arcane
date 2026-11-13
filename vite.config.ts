@@ -15,6 +15,8 @@ export default defineConfig({
 			'frontend/.svelte-kit/**',
 			'frontend/build/**',
 			'frontend/messages/**',
+			'frontend/openapi.yaml',
+			'frontend/src/lib/openapi/**',
 			'frontend/src/lib/paraglide/**',
 			'tests/.report/**'
 		],

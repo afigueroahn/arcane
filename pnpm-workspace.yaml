@@ -57,6 +57,7 @@ peerDependencyRules:
   allowedVersions:
     vite: '*'
     'formsnap@2.0.1>sveltekit-superforms': ^3.0.0
+    'openapi-typescript>typescript': ^6.0.0
 
 minimumReleaseAgeExclude:
   - '@sveltejs/kit@3.2.0'

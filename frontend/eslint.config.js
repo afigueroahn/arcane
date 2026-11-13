@@ -14,7 +14,7 @@ const shadcnRules = {
 
 export default defineConfig([
 	{
-		ignores: ['.svelte-kit/**', 'build/**', 'src/paraglide/**', 'src/lib/paraglide/**']
+		ignores: ['.svelte-kit/**', 'build/**', 'src/paraglide/**', 'src/lib/paraglide/**', 'src/lib/openapi/**']
 	},
 	{
 		files: ['**/*.svelte'],

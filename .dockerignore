@@ -26,6 +26,11 @@ frontend/src/paraglide
 **/project.inlang/.meta.json
 **/project.inlang/project_id
 
+# OpenAPI spec and the types generated from it; only type checks read them
+frontend/openapi.yaml
+frontend/redocly.yaml
+frontend/src/lib/openapi
+
 # Tests and reports
 **/*_test.go
 **/*.test.[jt]s

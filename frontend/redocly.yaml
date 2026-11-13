@@ -1,0 +1,9 @@
+extends:
+  - minimal
+
+# Huma's spec trips these rules; none of them affect type generation.
+rules:
+  struct: off
+  no-server-example.com: off
+  no-ambiguous-paths: off
+  spec-components-invalid-map-name: off

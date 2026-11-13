@@ -29,6 +29,7 @@ import (
 	"kit.getarcane.app/docker/streams/bus"
 
 	"getarcane.dev/arcane/v3/internal/activity"
+	"getarcane.dev/arcane/v3/internal/build"
 	"getarcane.dev/arcane/v3/internal/common"
 	"getarcane.dev/arcane/v3/internal/config"
 	"getarcane.dev/arcane/v3/internal/database"
@@ -75,6 +76,13 @@ type (
 		jobs      map[string]types.SchedulerJob
 		submitted []types.SchedulerRequest
 		mu        sync.Mutex
+	}
+
+	fakeRailpackBuilder struct {
+		err   error
+		block chan struct{}
+		calls []build.RailpackBuildOptions
+		mu    sync.Mutex
 	}
 )
 
@@ -204,7 +212,11 @@ func (s *gitOpsSyncTestScheduler) HasJob(_ string) bool {
 	return false
 }
 
-func setupGitOpsSyncRemoteTestService(t *testing.T, files map[string]string) (*GitOpsSyncService, *database.DB, string, *gitOpsSyncTestScheduler) {
+func setupGitOpsSyncRemoteTestService(
+	t *testing.T,
+	files map[string]string,
+	customize ...func(*GitOpsSyncServiceParams),
+) (*GitOpsSyncService, *database.DB, string, *gitOpsSyncTestScheduler) {
 	t.Helper()
 	installBackupTestTransport()
 
@@ -229,7 +241,7 @@ func setupGitOpsSyncRemoteTestService(t *testing.T, files map[string]string) (*G
 	repoService := gitrepo.NewGitRepositoryService(db, t.TempDir(), eventService, settingsService)
 
 	testScheduler := &gitOpsSyncTestScheduler{}
-	service := NewGitOpsSyncService(GitOpsSyncServiceParams{
+	params := GitOpsSyncServiceParams{
 		DB:              db,
 		RepoService:     repoService,
 		ProjectService:  projectService,
@@ -238,7 +250,11 @@ func setupGitOpsSyncRemoteTestService(t *testing.T, files map[string]string) (*G
 		Ctx:             ctx,
 		Scheduler:       testScheduler,
 		Admission:       newGitOpsAdmissionGateForTest(t),
-	})
+	}
+	for _, apply := range customize {
+		apply(&params)
+	}
+	service := NewGitOpsSyncService(params)
 
 	bare := filepath.Join(t.TempDir(), "sync.git")
 	_, err = gogit.PlainInit(bare, true)
@@ -2166,4 +2182,255 @@ func TestGitOpsSyncService_DeleteSync_RemoveStackWaitsForActiveSync(t *testing.T
 	case <-time.After(5 * time.Second):
 		require.FailNow(t, "delete did not run after admission was released")
 	}
+}
+
+func TestGitOpsSyncService_CreateSync_RejectsUnsupportedRailpackOptions(t *testing.T) {
+	svc, _, _, _ := setupGitOpsSyncRemoteTestService(t, map[string]string{"README.md": "demo\n"})
+	base := types.GitOpsSync{Name: "web", RepositoryID: "repo-1", Branch: "main", BuildStrategy: types.GitOpsBuildStrategyRailpack}
+	tests := []struct {
+		mutate func(*types.GitOpsSync)
+		name   string
+		field  string
+	}{
+		{name: "swarm target", field: "buildStrategy", mutate: func(req *types.GitOpsSync) { req.TargetType = "swarm_stack" }},
+		{name: "directory sync", field: "syncDirectory", mutate: func(req *types.GitOpsSync) { req.SyncDirectory = true }},
+		{name: "override file", field: "composeOverridePath", mutate: func(req *types.GitOpsSync) { req.ComposeOverridePath = "compose.override.yaml" }},
+		{name: "image pull", field: "pullImageAfterSync", mutate: func(req *types.GitOpsSync) { req.PullImageAfterSync = true }},
+		{name: "escaping source", field: "sourcePath", mutate: func(req *types.GitOpsSync) { req.SourcePath = "../outside" }},
+		{name: "absolute source", field: "sourcePath", mutate: func(req *types.GitOpsSync) { req.SourcePath = "/srv/app" }},
+		{name: "app port", field: "appPort", mutate: func(req *types.GitOpsSync) { req.AppPort = 70000 }},
+		{name: "host port", field: "hostPort", mutate: func(req *types.GitOpsSync) { req.HostPort = -1 }},
+		{name: "linked project", field: "projectId", mutate: func(req *types.GitOpsSync) { req.ProjectID = new("project-1") }},
+		{name: "backup mode", field: "mode", mutate: func(req *types.GitOpsSync) { req.Mode = types.GitOpsSyncModeBackup }},
+		{name: "unknown strategy", field: "buildStrategy", mutate: func(req *types.GitOpsSync) { req.BuildStrategy = "dockerfile" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := base
+			tt.mutate(&req)
+
+			_, err := svc.CreateSync(t.Context(), "0", SyncUpdate{Request: req, Submitted: map[string]bool{}, Actor: types.SystemUser})
+
+			require.ErrorIs(t, err, common.ErrValidation)
+			var fieldErr *types.FieldError
+			require.ErrorAs(t, err, &fieldErr)
+			assert.Equal(t, tt.field, fieldErr.Field)
+		})
+	}
+}
+
+func TestGitOpsSyncService_CreateSync_RailpackNeedsNoComposePathAndDeploysByDefault(t *testing.T) {
+	// The first run starts in the background; failing its build keeps it short of a deploy this test service cannot run.
+	builder := &fakeRailpackBuilder{err: errors.New("build stopped by the test")}
+	svc, _, _, _ := setupGitOpsSyncRemoteTestService(t, map[string]string{"web/index.html": "<h1>hi</h1>\n"}, withRailpackBuilder(t, builder))
+
+	created, err := svc.CreateSync(t.Context(), "0", SyncUpdate{
+		Request:   types.GitOpsSync{Name: "web", RepositoryID: "repo-1", Branch: "main", BuildStrategy: types.GitOpsBuildStrategyRailpack, SourcePath: "web"},
+		Submitted: map[string]bool{"name": true, "repositoryId": true, "branch": true, "buildStrategy": true, "sourcePath": true},
+		Actor:     types.SystemUser,
+	})
+	require.NoError(t, err)
+	waitForBackgroundSync(t, svc, created.ID)
+
+	assert.Empty(t, created.ComposePath)
+	assert.Equal(t, types.GitOpsBuildStrategyRailpack, created.BuildStrategy)
+	assert.True(t, created.RedeployAfterSync)
+	assert.Len(t, builder.recorded(), 1)
+}
+
+func TestGitOpsSyncService_StartSync_RailpackBuildsInBackgroundAndCreatesProject(t *testing.T) {
+	builder := &fakeRailpackBuilder{}
+	svc, db, projectsDir, _ := setupGitOpsSyncRemoteTestService(t, map[string]string{
+		"web/package.json": "{}\n",
+		"web/server.js":    "require('http').createServer(() => {}).listen(process.env.PORT)\n",
+	}, withRailpackBuilder(t, builder))
+	syncRecord := railpackSyncRecord(t, db)
+
+	result, err := svc.StartSync(t.Context(), SyncRequest{EnvironmentID: "0", SyncID: syncRecord.ID, Actor: types.SystemUser})
+	require.NoError(t, err)
+	require.NotNil(t, result.ActivityID)
+	waitForBackgroundSync(t, svc, syncRecord.ID)
+
+	var stored projectpkg.GitOpsSync
+	require.NoError(t, db.First(&stored, "id = ?", syncRecord.ID).Error)
+	require.Equal(t, "success", kit.FromPtr(stored.LastSyncStatus), kit.FromPtr(stored.LastSyncError))
+	require.NotNil(t, stored.ProjectID)
+	require.NotNil(t, stored.RailpackInfo)
+
+	calls := builder.recorded()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "web", filepath.Base(calls[0].ContextDir))
+	assert.Equal(t, "s3cret", calls[0].Env["API_KEY"])
+	assert.Equal(t, types.LocalDockerEnvironmentID, calls[0].EnvironmentID)
+	assert.Regexp(t, `^arcane\.local/web-sync-rai/app:[0-9a-f]{12}-[0-9a-f]{8}$`, calls[0].Image)
+	assert.Equal(t, calls[0].Image, stored.RailpackInfo.Image)
+	assert.Equal(t, []string{"node"}, stored.RailpackInfo.Providers)
+
+	compose, err := os.ReadFile(filepath.Join(projectsDir, "web", projects.DefaultComposeFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(compose), "image: "+calls[0].Image)
+	assert.Contains(t, string(compose), "18080:8080")
+	env, err := os.ReadFile(filepath.Join(projectsDir, "web", projects.EffectiveEnvFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(env), "API_KEY=s3cret")
+
+	var record activity.Activity
+	require.NoError(t, db.First(&record, "id = ?", *result.ActivityID).Error)
+	assert.Equal(t, types.ActivityStatusSuccess, record.Status)
+}
+
+func TestGitOpsSyncService_StartSync_RailpackJoinsTheRunningBuild(t *testing.T) {
+	builder := &fakeRailpackBuilder{block: make(chan struct{})}
+	svc, db, _, _ := setupGitOpsSyncRemoteTestService(t, map[string]string{"web/index.html": "<h1>hi</h1>\n"}, withRailpackBuilder(t, builder))
+	syncRecord := railpackSyncRecord(t, db)
+
+	first, err := svc.StartSync(t.Context(), SyncRequest{EnvironmentID: "0", SyncID: syncRecord.ID, Actor: types.SystemUser})
+	require.NoError(t, err)
+	second, err := svc.StartSync(t.Context(), SyncRequest{EnvironmentID: "0", SyncID: syncRecord.ID, Actor: types.SystemUser})
+	require.NoError(t, err)
+	close(builder.block)
+	waitForBackgroundSync(t, svc, syncRecord.ID)
+
+	require.NotNil(t, first.ActivityID)
+	require.NotNil(t, second.ActivityID)
+	assert.Equal(t, *first.ActivityID, *second.ActivityID)
+	assert.Len(t, builder.recorded(), 1)
+}
+
+func TestGitOpsSyncService_StartSync_RailpackBuildFailureFailsSyncAndActivity(t *testing.T) {
+	builder := &fakeRailpackBuilder{err: common.Classify(common.ErrValidation, errors.New("railpack could not plan the app: no start command was found"))}
+	svc, db, _, _ := setupGitOpsSyncRemoteTestService(t, map[string]string{"web/README.md": "docs only\n"}, withRailpackBuilder(t, builder))
+	syncRecord := railpackSyncRecord(t, db)
+
+	result, err := svc.StartSync(t.Context(), SyncRequest{EnvironmentID: "0", SyncID: syncRecord.ID, Actor: types.SystemUser})
+	require.NoError(t, err)
+	waitForBackgroundSync(t, svc, syncRecord.ID)
+
+	var stored projectpkg.GitOpsSync
+	require.NoError(t, db.First(&stored, "id = ?", syncRecord.ID).Error)
+	assert.Equal(t, "failed", kit.FromPtr(stored.LastSyncStatus))
+	assert.Contains(t, kit.FromPtr(stored.LastSyncError), "no start command")
+	assert.Nil(t, stored.ProjectID)
+	var record activity.Activity
+	require.NoError(t, db.First(&record, "id = ?", *result.ActivityID).Error)
+	assert.Equal(t, types.ActivityStatusFailed, record.Status)
+}
+
+func TestGitOpsSyncService_StartSync_ComposeSyncStaysSynchronous(t *testing.T) {
+	svc, db, _, _ := setupGitOpsSyncRemoteTestService(t, map[string]string{"compose.yaml": "services:\n  app:\n    image: nginx:alpine\n"})
+	require.NoError(t, db.AutoMigrate(&projectpkg.ProjectTag{}))
+	syncRecord := &projectpkg.GitOpsSync{
+		ID:            "sync-compose",
+		Name:          "Compose",
+		EnvironmentID: "0",
+		RepositoryID:  "repo-1",
+		Branch:        "main",
+		ComposePath:   "compose.yaml",
+		ProjectName:   "compose",
+		BuildStrategy: types.GitOpsBuildStrategyCompose,
+		SyncInterval:  60,
+	}
+	require.NoError(t, db.Create(syncRecord).Error)
+
+	result, err := svc.StartSync(t.Context(), SyncRequest{EnvironmentID: "0", SyncID: syncRecord.ID, Actor: types.SystemUser})
+
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Nil(t, result.ActivityID)
+}
+
+func TestGitOpsSyncService_UpdateSync_SwitchesBuildStrategy(t *testing.T) {
+	svc, db, _, _ := setupGitOpsSyncRemoteTestService(t, map[string]string{"README.md": "demo\n"})
+	syncRecord := &projectpkg.GitOpsSync{
+		ID:            "sync-switch",
+		Name:          "Switch",
+		EnvironmentID: "0",
+		RepositoryID:  "repo-1",
+		Branch:        "main",
+		ComposePath:   "compose.yaml",
+		ProjectName:   "switch",
+		BuildStrategy: types.GitOpsBuildStrategyCompose,
+		SyncInterval:  60,
+	}
+	require.NoError(t, db.Create(syncRecord).Error)
+
+	updated, err := svc.UpdateSync(t.Context(), "0", syncRecord.ID, SyncUpdate{
+		Request:   types.GitOpsSync{BuildStrategy: types.GitOpsBuildStrategyRailpack, SourcePath: "web", StartCommand: "node server.js", AppPort: 8080, HostPort: 18080},
+		Submitted: map[string]bool{"buildStrategy": true, "sourcePath": true, "startCommand": true, "appPort": true, "hostPort": true},
+		Actor:     types.SystemUser,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, types.GitOpsBuildStrategyRailpack, updated.BuildStrategy)
+	assert.Equal(t, "web", updated.SourcePath)
+	assert.Equal(t, "node server.js", updated.StartCommand)
+	assert.Equal(t, 8080, updated.AppPort)
+	assert.Equal(t, 18080, updated.HostPort)
+
+	_, err = svc.UpdateSync(t.Context(), "0", syncRecord.ID, SyncUpdate{
+		Request:   types.GitOpsSync{BuildStrategy: types.GitOpsBuildStrategyCompose, ComposePath: ""},
+		Submitted: map[string]bool{"buildStrategy": true, "composePath": true},
+		Actor:     types.SystemUser,
+	})
+	require.ErrorIs(t, err, common.ErrValidation)
+	var fieldErr *types.FieldError
+	require.ErrorAs(t, err, &fieldErr)
+	assert.Equal(t, "composePath", fieldErr.Field)
+}
+
+func (f *fakeRailpackBuilder) BuildRailpackImage(_ context.Context, opts build.RailpackBuildOptions) (*types.RailpackBuildInfo, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, opts)
+	f.mu.Unlock()
+	if f.block != nil {
+		<-f.block
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &types.RailpackBuildInfo{Image: opts.Image, RailpackVersion: "0.43.0", Providers: []string{"node"}, Packages: map[string]string{"node": "22.11.0"}}, nil
+}
+
+func (f *fakeRailpackBuilder) recorded() []build.RailpackBuildOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]build.RailpackBuildOptions(nil), f.calls...)
+}
+
+func withRailpackBuilder(t *testing.T, builder RailpackBuilder) func(*GitOpsSyncServiceParams) {
+	t.Helper()
+	return func(params *GitOpsSyncServiceParams) {
+		require.NoError(t, params.DB.AutoMigrate(&activity.Activity{}, &activity.ActivityMessage{}, &projectpkg.ProjectTag{}))
+		params.ActivityService = activity.NewActivityService(params.DB, nil)
+		params.RailpackBuilder = builder
+	}
+}
+
+func railpackSyncRecord(t *testing.T, db *database.DB) *projectpkg.GitOpsSync {
+	t.Helper()
+	syncRecord := &projectpkg.GitOpsSync{
+		ID:            "sync-railpack",
+		Name:          "Web",
+		EnvironmentID: "0",
+		RepositoryID:  "repo-1",
+		Branch:        "main",
+		ProjectName:   "web",
+		BuildStrategy: types.GitOpsBuildStrategyRailpack,
+		SourcePath:    "web",
+		AppPort:       8080,
+		HostPort:      18080,
+		EnvContent:    new("API_KEY=s3cret\n"),
+		SyncInterval:  60,
+	}
+	require.NoError(t, db.Create(syncRecord).Error)
+	return syncRecord
+}
+
+func waitForBackgroundSync(t *testing.T, svc *GitOpsSyncService, syncID string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		svc.backgroundMu.Lock()
+		defer svc.backgroundMu.Unlock()
+		_, running := svc.backgroundSyncs[syncID]
+		return !running
+	}, 15*time.Second, 20*time.Millisecond)
 }

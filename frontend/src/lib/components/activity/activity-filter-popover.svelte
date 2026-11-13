@@ -29,7 +29,8 @@
 		'vulnerability_scan',
 		'auto_update',
 		'system_prune',
-		'resource_action'
+		'resource_action',
+		'gitops_sync'
 	];
 </script>
 

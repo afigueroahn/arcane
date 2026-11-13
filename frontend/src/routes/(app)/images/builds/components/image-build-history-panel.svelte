@@ -224,7 +224,8 @@
 				<InfoIcon class="size-4" />
 				{m.common_view_details()}
 			</DropdownMenu.Item>
-			{#if hasPermission('images:build', item.environmentId)}
+			<!-- Railpack builds come from a Git sync and rebuild by syncing it again. -->
+			{#if hasPermission('images:build', item.environmentId) && item.provider !== 'railpack'}
 				<DropdownMenu.Item onclick={() => onApplyBuild(item, item.environmentId)}>
 					<RedeployIcon class="size-4" />
 					{m.build_rebuild()}

@@ -115,7 +115,7 @@ var (
 			provideVulnerabilityService,
 			provideImageUpdateService,
 			provideImageService,
-			build.NewBuildService,
+			fx.Annotate(build.NewBuildService, fx.As(fx.Self()), fx.As(new(gitops.RailpackBuilder))),
 			project.NewLifecycleService,
 			container.NewContainerService,
 			network.NewNetworkService,

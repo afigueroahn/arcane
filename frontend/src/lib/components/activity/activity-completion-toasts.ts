@@ -27,7 +27,8 @@ const LONG_RUNNING_TYPES = new Set<ActivityType>([
 	'vulnerability_scan',
 	'image_patch',
 	'auto_update',
-	'system_prune'
+	'system_prune',
+	'gitops_sync'
 ]);
 
 type ActivityToastNavigator = (activityId?: string, batchId?: string) => void;

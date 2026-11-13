@@ -9,7 +9,7 @@
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { settingsService } from '#lib/services/settings-service.js';
-	import type { GitOpsSync, GitOpsSyncMode } from '#lib/types/gitops.js';
+	import type { GitOpsBuildStrategy, GitOpsSync, GitOpsSyncMode } from '#lib/types/gitops.js';
 	import type { GitOpsSyncCreate, GitOpsSyncUpdate } from '#lib/types/ui/gitops.js';
 
 	import GitOpsSyncForm from './gitops-sync-form.svelte';
@@ -21,6 +21,7 @@
 		targetType?: string;
 		mode?: GitOpsSyncMode;
 		projectId?: string;
+		buildStrategy?: GitOpsBuildStrategy;
 		onSubmit: (detail: { sync: GitOpsSyncCreate | GitOpsSyncUpdate; isEditMode: boolean }) => void;
 		isLoading: boolean;
 	};
@@ -32,6 +33,7 @@
 		targetType,
 		mode,
 		projectId,
+		buildStrategy,
 		onSubmit,
 		isLoading
 	}: GitOpsSyncDialogProps = $props();
@@ -65,6 +67,7 @@
 				bind:mode={selectedMode}
 				{targetType}
 				{projectId}
+				{buildStrategy}
 				settings={settingsQuery.data.values}
 				{onSubmit}
 			/>

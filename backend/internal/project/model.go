@@ -72,22 +72,31 @@ type (
 		BackupFailureReason    *string    `json:"backupFailureReason,omitempty" gorm:"column:backup_failure_reason"`
 		LastBackupAt           *time.Time `json:"lastBackupAt,omitempty" gorm:"column:last_backup_at" sortable:"true"`
 		LastBackupSnapshot     *string    `json:"-" gorm:"column:last_backup_snapshot"`
-		Name                   string     `json:"name" sortable:"true" search:"sync,gitops,automation,deploy,deployment,continuous"`
-		EnvironmentID          string     `json:"environmentId" sortable:"true"`
-		RepositoryID           string     `json:"repositoryId" sortable:"true"`
-		Branch                 string     `json:"branch" sortable:"true" search:"branch,main,master,develop,feature,release"`
-		ComposePath            string     `json:"composePath" sortable:"true" search:"compose,docker-compose,path,file,yaml,yml"`
-		ComposeOverridePath    string     `json:"composeOverridePath" gorm:"column:compose_override_path;not null;default:''"`
-		TargetType             string     `json:"targetType" gorm:"column:target_type;default:'project'"` // "project" or "swarm_stack"
-		ProjectName            string     `json:"projectName" sortable:"true" search:"project,name,stack,application,service"`
+		// What the last Railpack build detected; its package versions pin the next build.
+		RailpackInfo        *types.RailpackBuildInfo `json:"railpackInfo,omitempty" gorm:"column:railpack_info;type:text;serializer:json"`
+		Name                string                   `json:"name" sortable:"true" search:"sync,gitops,automation,deploy,deployment,continuous"`
+		EnvironmentID       string                   `json:"environmentId" sortable:"true"`
+		RepositoryID        string                   `json:"repositoryId" sortable:"true"`
+		Branch              string                   `json:"branch" sortable:"true" search:"branch,main,master,develop,feature,release"`
+		ComposePath         string                   `json:"composePath" sortable:"true" search:"compose,docker-compose,path,file,yaml,yml"`
+		ComposeOverridePath string                   `json:"composeOverridePath" gorm:"column:compose_override_path;not null;default:''"`
+		TargetType          string                   `json:"targetType" gorm:"column:target_type;default:'project'"` // "project" or "swarm_stack"
+		ProjectName         string                   `json:"projectName" sortable:"true" search:"project,name,stack,application,service"`
 		// Docker network mode for the runner: "none" denies access; "bridge", "host", or a named network enables it.
 		PreDeployNetworkMode string `json:"preDeployNetworkMode" gorm:"column:pre_deploy_network_mode;default:'none'"`
 
 		// Backup mode ("backup" commits saved project files to the repository;
 		// "deploy" is the original pull direction).
-		Mode                string               `json:"mode" gorm:"column:mode;default:'deploy'" sortable:"true" search:"mode,backup,deploy,direction"`
-		BackupDirectory     string               `json:"backupDirectory" gorm:"column:backup_directory" sortable:"true" search:"backup,directory,destination,folder"`
+		Mode            string `json:"mode" gorm:"column:mode;default:'deploy'" sortable:"true" search:"mode,backup,deploy,direction"`
+		BackupDirectory string `json:"backupDirectory" gorm:"column:backup_directory" sortable:"true" search:"backup,directory,destination,folder"`
+		// BuildStrategy is "compose" (deploy the repository's compose file) or "railpack" (build the app without a Dockerfile).
+		BuildStrategy       string               `json:"buildStrategy" gorm:"column:build_strategy;not null;default:'compose'" search:"railpack,build,strategy,dockerfile"`
+		SourcePath          string               `json:"sourcePath" gorm:"column:source_path;not null;default:''"`
+		BuildCommand        string               `json:"buildCommand" gorm:"column:build_command;not null;default:''"`
+		StartCommand        string               `json:"startCommand" gorm:"column:start_command;not null;default:''"`
 		BackupPaths         database.StringSlice `json:"backupPaths" gorm:"column:backup_paths;type:text"`
+		AppPort             int                  `json:"appPort" gorm:"column:app_port;not null;default:0"`
+		HostPort            int                  `json:"hostPort" gorm:"column:host_port;not null;default:0"`
 		SyncInterval        int                  `json:"syncInterval" sortable:"true" search:"interval,frequency,schedule,cron,minutes"` // in minutes
 		MaxSyncFiles        int                  `json:"maxSyncFiles" gorm:"column:max_sync_files;default:500"`                          // 0 = unlimited; env var overrides take precedence
 		MaxSyncTotalSize    int64                `json:"maxSyncTotalSize" gorm:"column:max_sync_total_size;default:52428800"`            // bytes; 0 = unlimited; env var overrides take precedence

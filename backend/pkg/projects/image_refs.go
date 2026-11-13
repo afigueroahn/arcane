@@ -96,11 +96,14 @@ func PullableImageRefs(project *composetypes.Project) []string {
 	}
 	return uniqueImageRefs(len(project.Services), func(yield func(string)) {
 		for _, service := range project.Services {
-			if service.Build == nil {
-				yield(service.Image)
-			}
-			for _, image := range composeapi.GetDependentImages(service, project.Name) {
-				yield(image)
+			// Like compose pull, pull_policy: never skips the service image and its hook images.
+			if ResolveServiceImagePullMode(service).Mode != ImagePullModeNever {
+				if service.Build == nil {
+					yield(service.Image)
+				}
+				for _, image := range composeapi.GetDependentImages(service, project.Name) {
+					yield(image)
+				}
 			}
 			for _, volume := range service.Volumes {
 				if volume.Type == composetypes.VolumeTypeImage {

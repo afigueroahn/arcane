@@ -233,3 +233,8 @@ func TestPrepareServiceBuildRequest_GeneratedImageProviderGuardrails(t *testing.
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must define an image when push is enabled")
 }
+
+func TestLocalImageRepository(t *testing.T) {
+	assert.Equal(t, "arcane.local/my-app-12345678/web", LocalImageRepository("1234567890ab", "My App", "web"))
+	assert.Equal(t, "arcane.local/project-abc/service", LocalImageRepository("abc", "", ""))
+}

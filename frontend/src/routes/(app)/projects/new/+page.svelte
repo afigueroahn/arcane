@@ -462,6 +462,9 @@
 					onConvert={() => (ui.showConverterDialog = true)}
 					fromGitLabel={m.git_from_git_repo()}
 					onFromGit={async () => goto(resolve(`/(app)/gitops?action=create&env=${encodeURIComponent(environmentId)}`))}
+					fromSourceLabel={hasPermission('images:build', environmentId) ? m.from_source_no_dockerfile() : undefined}
+					onFromSource={async () =>
+						goto(resolve(`/(app)/gitops?action=create&buildStrategy=railpack&env=${encodeURIComponent(environmentId)}`))}
 					createTemplateLabel={m.templates_create_template()}
 					createTemplateDisabled={!inputs.name.value ||
 						!inputs.composeContent.value ||

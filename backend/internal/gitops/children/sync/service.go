@@ -24,8 +24,10 @@ import (
 	"kit.getarcane.app"
 	"kit.getarcane.app/acfs"
 	acfstypes "kit.getarcane.app/acfs/types"
+	dockertypes "kit.getarcane.app/docker/types"
 	kitfs "kit.getarcane.app/fs"
 
+	"getarcane.dev/arcane/v3/internal/build"
 	"getarcane.dev/arcane/v3/internal/common"
 	"getarcane.dev/arcane/v3/internal/database"
 	"getarcane.dev/arcane/v3/internal/event"
@@ -44,9 +46,15 @@ type (
 		projectService *projectpkg.ProjectService
 		swarmService   *swarm.SwarmService
 		eventService   *event.EventService
+		builder        Builder
 		limits         func(context.Context, *projectpkg.GitOpsSync) (int, int64, int64)
 		logError       func(context.Context, *projectpkg.GitOpsSync, types.Actor, string)
 		unregisterJob  func(context.Context, string)
+	}
+
+	// Builder builds a Railpack sync's app source into an image.
+	Builder interface {
+		BuildRailpackImage(ctx context.Context, opts build.RailpackBuildOptions) (*types.RailpackBuildInfo, error)
 	}
 	syncRevision struct {
 		Commit string `json:"commit"`
@@ -83,6 +91,7 @@ type (
 		ProjectService *projectpkg.ProjectService
 		SwarmService   *swarm.SwarmService
 		EventService   *event.EventService
+		Builder        Builder
 		Limits         func(context.Context, *projectpkg.GitOpsSync) (int, int64, int64)
 		LogError       func(context.Context, *projectpkg.GitOpsSync, types.Actor, string)
 		UnregisterJob  func(context.Context, string)
@@ -99,6 +108,7 @@ func New(p Params) *Service {
 		projectService: p.ProjectService,
 		swarmService:   p.SwarmService,
 		eventService:   p.EventService,
+		builder:        p.Builder,
 		limits:         p.Limits,
 		logError:       p.LogError,
 		unregisterJob:  p.UnregisterJob,
@@ -135,6 +145,16 @@ func (s *Service) Run(ctx context.Context, sourceTimeout time.Duration, sync *pr
 	if err != nil {
 		return result, err
 	}
+	railpack := sync.BuildStrategy == types.GitOpsBuildStrategyRailpack
+	if railpack {
+		// stageCtx bounds the clone, not an image build, so the build runs on ctx and the project write gets a fresh window.
+		if buildErr := s.buildRailpackSource(ctx, sync, result, actor, source); buildErr != nil {
+			return result, buildErr
+		}
+		var cancelTarget context.CancelFunc
+		stageCtx, cancelTarget = context.WithTimeout(ctx, sourceTimeout)
+		defer cancelTarget()
+	}
 
 	var syncFiles []projects.SyncFile
 	if sync.SyncDirectory {
@@ -159,7 +179,7 @@ func (s *Service) Run(ctx context.Context, sourceTimeout time.Duration, sync *pr
 		return result, err
 	}
 	if syncedFiles == nil {
-		syncedFiles = []string{filepath.Base(sync.ComposePath)}
+		syncedFiles = []string{kit.Ternary(railpack, projects.DefaultComposeFileName, filepath.Base(sync.ComposePath))}
 		if source.overrideFileName != "" {
 			syncedFiles = append(syncedFiles, source.overrideFileName)
 		}
@@ -251,6 +271,9 @@ func (s *Service) syncTarget(
 			return nil, nil, false, err
 		}
 		result.Message = fmt.Sprintf("Successfully synced compose file from %s to project %s", sync.ComposePath, project.Name)
+		if sync.BuildStrategy == types.GitOpsBuildStrategyRailpack {
+			result.Message = fmt.Sprintf("Successfully synced project %s with Railpack image %s", project.Name, sync.RailpackInfo.Image)
+		}
 	}
 	return project, syncedFiles, changed, nil
 }
@@ -329,26 +352,11 @@ func (s *Service) prepareSyncSource(ctx context.Context, sync *projectpkg.GitOps
 		return source, progressErr
 	}
 
-	if !s.repoService.FileExists(ctx, repoPath, sync.ComposePath) {
-		return source, s.failSync(ctx, result, sync, actor, "Compose file not found at "+sync.ComposePath, errors.New("compose file not found: "+sync.ComposePath))
-	}
-	source.composeContent, err = s.repoService.ReadFile(ctx, repoPath, sync.ComposePath)
-	if err != nil {
-		return source, s.failSync(ctx, result, sync, actor, "Failed to read compose file", err)
-	}
-
-	composeDir := filepath.Dir(sync.ComposePath)
-	envPath := filepath.Join(composeDir, ".env")
-	if s.repoService.FileExists(ctx, repoPath, envPath) {
-		if content, readErr := s.repoService.ReadFile(ctx, repoPath, envPath); readErr != nil {
-			slog.WarnContext(ctx, "Failed to read .env file", "path", envPath, "error", readErr)
-		} else {
-			source.envContent = &content
+	// A Railpack sync generates its compose file, so its environment is the sync's variables alone.
+	if sync.BuildStrategy != types.GitOpsBuildStrategyRailpack {
+		if readErr := s.readComposeSource(ctx, sync, result, actor, source); readErr != nil {
+			return source, readErr
 		}
-	}
-
-	if err = s.resolveSyncOverride(ctx, sync, source); err != nil {
-		return source, s.failSync(ctx, result, sync, actor, "Failed to read compose override file", err)
 	}
 
 	// A non-nil empty value means the variables were cleared; it still replaces the git layer so their old values go.
@@ -360,6 +368,70 @@ func (s *Service) prepareSyncSource(ctx context.Context, sync *projectpkg.GitOps
 		source.envContent = &merged
 	}
 	return source, nil
+}
+
+// readComposeSource reads the compose file from the clone, with the .env and override file beside it.
+func (s *Service) readComposeSource(ctx context.Context, sync *projectpkg.GitOpsSync, result *types.GitOpsSyncResult, actor types.Actor, source *preparedSyncSource) error {
+	if !s.repoService.FileExists(ctx, source.repoPath, sync.ComposePath) {
+		return s.failSync(ctx, result, sync, actor, "Compose file not found at "+sync.ComposePath, errors.New("compose file not found: "+sync.ComposePath))
+	}
+	composeContent, err := s.repoService.ReadFile(ctx, source.repoPath, sync.ComposePath)
+	if err != nil {
+		return s.failSync(ctx, result, sync, actor, "Failed to read compose file", err)
+	}
+	source.composeContent = composeContent
+
+	envPath := filepath.Join(filepath.Dir(sync.ComposePath), ".env")
+	if s.repoService.FileExists(ctx, source.repoPath, envPath) {
+		if content, readErr := s.repoService.ReadFile(ctx, source.repoPath, envPath); readErr != nil {
+			slog.WarnContext(ctx, "Failed to read .env file", "path", envPath, "error", readErr)
+		} else {
+			source.envContent = &content
+		}
+	}
+
+	if err = s.resolveSyncOverride(ctx, sync, source); err != nil {
+		return s.failSync(ctx, result, sync, actor, "Failed to read compose override file", err)
+	}
+	return nil
+}
+
+// buildRailpackSource builds the app at the synced commit and points the source at a compose file that runs the image.
+func (s *Service) buildRailpackSource(ctx context.Context, sync *projectpkg.GitOpsSync, result *types.GitOpsSyncResult, actor types.Actor, source *preparedSyncSource) error {
+	contextDir, err := railpackContextDir(source.repoPath, sync.SourcePath)
+	if err != nil {
+		return s.failSync(ctx, result, sync, actor, "Invalid source directory", common.Classify(common.ErrValidation, err))
+	}
+	env, err := projects.ParseProjectEnvContent(kit.FromPtr(source.envContent), nil)
+	if err != nil {
+		return s.failSync(ctx, result, sync, actor, "Failed to read sync environment variables", err)
+	}
+	progress, _ := ctx.Value(dockertypes.ProgressWriterKey{}).(io.Writer)
+	info, err := s.builder.BuildRailpackImage(ctx, build.RailpackBuildOptions{
+		Previous:      sync.RailpackInfo,
+		Actor:         &actor,
+		Progress:      progress,
+		Env:           env,
+		EnvironmentID: types.LocalDockerEnvironmentID,
+		Source:        sync.Repository.URL + "#" + source.commitHash + ":" + sync.SourcePath,
+		ContextDir:    contextDir,
+		Image:         railpackImageRef(sync, source.commitHash, env),
+		BuildCommand:  sync.BuildCommand,
+		StartCommand:  sync.StartCommand,
+	})
+	if err != nil {
+		return s.failSync(ctx, result, sync, actor, "Failed to build the app with Railpack", err)
+	}
+	// The serializer applies to struct updates, so the info is written through the model.
+	if updateErr := s.db.WithContext(ctx).Model(&projectpkg.GitOpsSync{}).Where("id = ?", sync.ID).Select("railpack_info").
+		Updates(&projectpkg.GitOpsSync{RailpackInfo: info}).Error; updateErr != nil {
+		slog.WarnContext(ctx, "Failed to record Railpack build info", "syncId", sync.ID, "error", updateErr)
+	}
+	sync.RailpackInfo = info
+	if source.composeContent, err = railpackCompose(info.Image, sync.AppPort, sync.HostPort); err != nil {
+		return s.failSync(ctx, result, sync, actor, "Failed to generate the compose file", err)
+	}
+	return nil
 }
 
 func (s *Service) resolveSyncOverride(ctx context.Context, sync *projectpkg.GitOpsSync, source *preparedSyncSource) error {

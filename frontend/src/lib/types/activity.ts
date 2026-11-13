@@ -25,7 +25,8 @@ export type ActivityType =
 	| 'vulnerability_scan'
 	| 'auto_update'
 	| 'system_prune'
-	| 'resource_action';
+	| 'resource_action'
+	| 'gitops_sync';
 
 export type ActivityMessageLevel = 'info' | 'warning' | 'error' | 'success';
 

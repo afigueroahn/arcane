@@ -13,14 +13,20 @@
 	import { Switch } from '#lib/components/ui/switch/index.js';
 	import { ArrowRightIcon, CodeIcon, InfoIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
+	import type { GitOpsBuildStrategy, RailpackBuildInfo } from '#lib/types/gitops.js';
 	import { extractApiErrorMessage } from '#lib/utils/api.js';
 
 	import type { GitOpsSyncBrowseTarget, GitOpsSyncFormState, GitOpsSyncTargetType } from './gitops-sync-form.svelte';
+	import GitOpsSyncRailpackFields from './gitops-sync-railpack-fields.svelte';
 	import GitOpsSyncScheduleFields from './gitops-sync-schedule-fields.svelte';
 
 	type Props = {
 		form: GitOpsSyncFormState;
 		isEditMode: boolean;
+		environmentId: string;
+		canBuildFromSource: boolean;
+		onBuildStrategyChange: (value: GitOpsBuildStrategy) => void;
+		railpackInfo?: RailpackBuildInfo;
 		selectedTargetType: GitOpsSyncTargetType;
 		onTargetTypeChange: (value: GitOpsSyncTargetType) => void;
 		projectOptions: { value: string; label: string }[];
@@ -35,6 +41,10 @@
 	let {
 		form,
 		isEditMode,
+		environmentId,
+		canBuildFromSource,
+		onBuildStrategyChange,
+		railpackInfo,
 		selectedTargetType,
 		onTargetTypeChange,
 		projectOptions,
@@ -72,21 +82,43 @@
 
 	const newProjectOption = '__new__';
 	const deployProjectOptions = $derived([{ value: newProjectOption, label: m.create_new_project() }, ...projectOptions]);
+
+	const isRailpack = $derived(inputs.buildStrategy.value === 'railpack');
+	const strategyOptions = $derived(
+		(
+			[
+				{ value: 'compose', label: m.build_strategy_compose(), description: m.build_strategy_compose_description() },
+				{ value: 'railpack', label: m.build_strategy_railpack(), description: m.build_strategy_railpack_description() }
+			] satisfies { value: GitOpsBuildStrategy; label: string; description: string }[]
+		).filter((option) => option.value !== 'railpack' || canBuildFromSource)
+	);
 </script>
+
+{#if strategyOptions.length > 1}
+	<SelectWithLabel
+		id="buildStrategy"
+		label={m.build_strategy()}
+		value={inputs.buildStrategy.value}
+		options={strategyOptions}
+		onValueChange={(value) => onBuildStrategyChange(value as GitOpsBuildStrategy)}
+	/>
+{/if}
 
 <div class="grid gap-3 sm:grid-cols-2">
 	<FormInput label={m.git_sync_name()} type="text" placeholder={m.common_name_placeholder()} bind:input={inputs.name} />
 
-	<SelectWithLabel
-		id="targetType"
-		label={m.target_type()}
-		value={selectedTargetType}
-		options={targetTypeOptions}
-		onValueChange={(value) => onTargetTypeChange(value as GitOpsSyncTargetType)}
-	/>
+	{#if !isRailpack}
+		<SelectWithLabel
+			id="targetType"
+			label={m.target_type()}
+			value={selectedTargetType}
+			options={targetTypeOptions}
+			onValueChange={(value) => onTargetTypeChange(value as GitOpsSyncTargetType)}
+		/>
+	{/if}
 </div>
 
-{#if !isEditMode && selectedTargetType === 'project'}
+{#if !isEditMode && selectedTargetType === 'project' && !isRailpack}
 	<SelectWithLabel
 		id="deployProject"
 		label={m.project()}
@@ -98,14 +130,18 @@
 	/>
 {/if}
 
-{@render source(true)}
+{@render source(!isRailpack)}
+
+{#if isRailpack}
+	<GitOpsSyncRailpackFields {form} {environmentId} {railpackInfo} />
+{/if}
 
 <div class="space-y-2">
 	<FormInput
 		type="textarea"
 		label={m.common_environment_variables()}
 		placeholder={m.git_sync_pre_deploy_env_placeholder()}
-		helpText={m.env_merge_help()}
+		helpText={isRailpack ? m.railpack_env_help() : m.env_merge_help()}
 		bind:input={inputs.envContent}
 		class="[&_textarea]:font-mono [&_textarea]:text-xs"
 	/>
@@ -125,37 +161,39 @@
 		showAutoSyncError
 	/>
 
-	<div class="flex items-center justify-between gap-4 py-3">
-		<div class="min-w-0">
-			<Label for="syncDirectorySwitch" class="mb-0">{m.git_sync_sync_files()}</Label>
-			<p class="text-xs text-muted-foreground">
-				{lockSyncDirectory ? m.git_sync_sync_files_locked_hint() : m.git_sync_sync_files_description()}
-			</p>
-			{#if inputs.syncDirectory.error}
-				<p class="text-xs font-medium text-destructive">{inputs.syncDirectory.error}</p>
-			{/if}
+	{#if !isRailpack}
+		<div class="flex items-center justify-between gap-4 py-3">
+			<div class="min-w-0">
+				<Label for="syncDirectorySwitch" class="mb-0">{m.git_sync_sync_files()}</Label>
+				<p class="text-xs text-muted-foreground">
+					{lockSyncDirectory ? m.git_sync_sync_files_locked_hint() : m.git_sync_sync_files_description()}
+				</p>
+				{#if inputs.syncDirectory.error}
+					<p class="text-xs font-medium text-destructive">{inputs.syncDirectory.error}</p>
+				{/if}
+			</div>
+			<Switch id="syncDirectorySwitch" bind:checked={inputs.syncDirectory.value} disabled={lockSyncDirectory} />
 		</div>
-		<Switch id="syncDirectorySwitch" bind:checked={inputs.syncDirectory.value} disabled={lockSyncDirectory} />
-	</div>
 
-	<div class="flex items-center justify-between gap-4 py-3">
-		<div class="min-w-0">
-			<Label for="pullImageAfterSyncSwitch" class="mb-0">{m.git_sync_pull_image_after_sync()}</Label>
-			<p class="text-xs text-muted-foreground">
-				{inputs.redeployAfterSync.value
-					? m.git_sync_pull_image_after_sync_redundant_description()
-					: m.git_sync_pull_image_after_sync_description()}
-			</p>
-			{#if inputs.pullImageAfterSync.error}
-				<p class="text-xs font-medium text-destructive">{inputs.pullImageAfterSync.error}</p>
-			{/if}
+		<div class="flex items-center justify-between gap-4 py-3">
+			<div class="min-w-0">
+				<Label for="pullImageAfterSyncSwitch" class="mb-0">{m.git_sync_pull_image_after_sync()}</Label>
+				<p class="text-xs text-muted-foreground">
+					{inputs.redeployAfterSync.value
+						? m.git_sync_pull_image_after_sync_redundant_description()
+						: m.git_sync_pull_image_after_sync_description()}
+				</p>
+				{#if inputs.pullImageAfterSync.error}
+					<p class="text-xs font-medium text-destructive">{inputs.pullImageAfterSync.error}</p>
+				{/if}
+			</div>
+			<Switch
+				id="pullImageAfterSyncSwitch"
+				bind:checked={inputs.pullImageAfterSync.value}
+				disabled={inputs.redeployAfterSync.value}
+			/>
 		</div>
-		<Switch
-			id="pullImageAfterSyncSwitch"
-			bind:checked={inputs.pullImageAfterSync.value}
-			disabled={inputs.redeployAfterSync.value}
-		/>
-	</div>
+	{/if}
 
 	<div class="flex items-center justify-between gap-4 py-3">
 		<div class="min-w-0">
@@ -169,50 +207,8 @@
 	</div>
 </div>
 
-<Collapsible.Root class="group/collapsible">
-	<Collapsible.Trigger>
-		{#snippet child({ props })}
-			<button
-				{...props}
-				type="button"
-				class="flex w-full items-center justify-between gap-3 py-1 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
-			>
-				{m.git_sync_per_sync_file_limits_title()}
-				<ArrowRightIcon class="size-4 shrink-0 transition-transform group-data-[state=open]/collapsible:rotate-90" />
-			</button>
-		{/snippet}
-	</Collapsible.Trigger>
-	<Collapsible.Content>
-		<div class="space-y-3 pt-3">
-			<p class="text-xs text-muted-foreground">{m.git_sync_per_sync_file_limits_description()}</p>
-			<div class="grid gap-3 sm:grid-cols-3">
-				<FormInput
-					label={m.git_sync_max_files_label()}
-					type="number"
-					placeholder="0"
-					helpText={m.git_sync_max_files_per_sync_help()}
-					bind:input={inputs.maxSyncFiles}
-				/>
-				<FormInput
-					label={m.git_sync_max_total_size_label()}
-					type="number"
-					placeholder="0"
-					helpText={m.git_sync_max_total_size_per_sync_help()}
-					bind:input={inputs.maxSyncTotalSizeMb}
-				/>
-				<FormInput
-					label={m.git_sync_max_binary_size_label()}
-					type="number"
-					placeholder="0"
-					helpText={m.git_sync_max_binary_size_per_sync_help()}
-					bind:input={inputs.maxSyncBinarySizeMb}
-				/>
-			</div>
-		</div>
-	</Collapsible.Content>
-</Collapsible.Root>
-
-{#if lifecycleEnabled && canManageLifecycle && selectedTargetType === 'project'}
+<!-- Railpack syncs read the whole clone and run no pre-deploy hooks, so these sections only apply to compose syncs. -->
+{#if !isRailpack}
 	<Collapsible.Root class="group/collapsible">
 		<Collapsible.Trigger>
 			{#snippet child({ props })}
@@ -221,105 +217,150 @@
 					type="button"
 					class="flex w-full items-center justify-between gap-3 py-1 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
 				>
-					{m.git_sync_pre_deploy_title()}
+					{m.git_sync_per_sync_file_limits_title()}
 					<ArrowRightIcon class="size-4 shrink-0 transition-transform group-data-[state=open]/collapsible:rotate-90" />
 				</button>
 			{/snippet}
 		</Collapsible.Trigger>
 		<Collapsible.Content>
 			<div class="space-y-3 pt-3">
-				<Alert.Root variant="warning-subtle" size="sm">
-					<InfoIcon class="size-4" />
-					<Alert.Description>
-						{m.git_sync_pre_deploy_acknowledgement()}
-					</Alert.Description>
-				</Alert.Root>
-
-				<p class="text-xs text-muted-foreground">{m.git_sync_pre_deploy_description()}</p>
-
-				<div class="space-y-2">
-					<Label for="preDeployScriptPath">
-						{m.git_sync_pre_deploy_script_path_label()}
-					</Label>
-					<div class="flex gap-2">
-						<div class="flex-1">
-							<Input
-								id="preDeployScriptPath"
-								type="text"
-								placeholder={m.git_sync_pre_deploy_script_path_placeholder()}
-								bind:value={inputs.preDeployScriptPath.value}
-								aria-invalid={inputs.preDeployScriptPath.error ? 'true' : undefined}
-							/>
-						</div>
-						{@render browseButton('preDeployScript')}
-					</div>
-					<p class="text-xs text-muted-foreground">{m.git_sync_pre_deploy_script_path_help()}</p>
-					{#if inputs.preDeployScriptPath.error}
-						<p class="text-xs font-medium text-destructive">{inputs.preDeployScriptPath.error}</p>
-					{/if}
-				</div>
-
-				<FormInput
-					label={m.git_sync_pre_deploy_runner_image_label()}
-					type="text"
-					placeholder={m.git_sync_pre_deploy_runner_image_placeholder()}
-					helpText={m.git_sync_pre_deploy_runner_image_help()}
-					bind:input={inputs.preDeployRunnerImage}
-				/>
-
-				<div class="grid gap-3 sm:grid-cols-2">
+				<p class="text-xs text-muted-foreground">{m.git_sync_per_sync_file_limits_description()}</p>
+				<div class="grid gap-3 sm:grid-cols-3">
 					<FormInput
-						label={m.git_sync_pre_deploy_timeout_label()}
+						label={m.git_sync_max_files_label()}
 						type="number"
-						placeholder="60"
-						helpText={m.git_sync_pre_deploy_timeout_help()}
-						bind:input={inputs.preDeployTimeoutSec}
+						placeholder="0"
+						helpText={m.git_sync_max_files_per_sync_help()}
+						bind:input={inputs.maxSyncFiles}
 					/>
 					<FormInput
-						label={m.resource_network_cap()}
-						type="text"
-						placeholder={m.git_sync_pre_deploy_network_mode_placeholder()}
-						helpText={m.git_sync_pre_deploy_network_mode_help()}
-						bind:input={inputs.preDeployNetworkMode}
+						label={m.git_sync_max_total_size_label()}
+						type="number"
+						placeholder="0"
+						helpText={m.git_sync_max_total_size_per_sync_help()}
+						bind:input={inputs.maxSyncTotalSizeMb}
+					/>
+					<FormInput
+						label={m.git_sync_max_binary_size_label()}
+						type="number"
+						placeholder="0"
+						helpText={m.git_sync_max_binary_size_per_sync_help()}
+						bind:input={inputs.maxSyncBinarySizeMb}
 					/>
 				</div>
-
-				<FormInput
-					type="textarea"
-					label={m.git_sync_pre_deploy_env_label()}
-					placeholder={m.git_sync_pre_deploy_env_placeholder()}
-					helpText={m.git_sync_pre_deploy_env_help()}
-					bind:input={inputs.preDeployEnv}
-					class="[&_textarea]:font-mono [&_textarea]:text-xs"
-				/>
-
-				<FormInput
-					type="textarea"
-					label={m.git_sync_pre_deploy_extra_mounts_label()}
-					placeholder={m.git_sync_pre_deploy_extra_mounts_placeholder()}
-					helpText={m.git_sync_pre_deploy_extra_mounts_help()}
-					bind:input={inputs.preDeployExtraMounts}
-					class="[&_textarea]:font-mono [&_textarea]:text-xs"
-				/>
 			</div>
 		</Collapsible.Content>
 	</Collapsible.Root>
-{:else if lifecycleEnabled && canManageLifecycle}
-	<p class="text-xs text-muted-foreground">
-		<span class="font-medium">{m.git_sync_pre_deploy_title()}</span> · {m.git_sync_pre_deploy_swarm_unsupported()}
-	</p>
-{:else if lifecycleEnabled}
-	<p class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-		<span><span class="font-medium">{m.git_sync_pre_deploy_title()}</span> · {m.git_sync_pre_deploy_managed_hint()}</span>
-		<span class="inline-flex shrink-0 items-center gap-1.5">
-			{#if hookConfigured}
-				<CodeIcon class="size-3.5" />
-				{m.common_configured()}
-			{:else}
-				{m.common_not_configured()}
-			{/if}
-		</span>
-	</p>
+
+	{#if lifecycleEnabled && canManageLifecycle && selectedTargetType === 'project'}
+		<Collapsible.Root class="group/collapsible">
+			<Collapsible.Trigger>
+				{#snippet child({ props })}
+					<button
+						{...props}
+						type="button"
+						class="flex w-full items-center justify-between gap-3 py-1 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+					>
+						{m.git_sync_pre_deploy_title()}
+						<ArrowRightIcon class="size-4 shrink-0 transition-transform group-data-[state=open]/collapsible:rotate-90" />
+					</button>
+				{/snippet}
+			</Collapsible.Trigger>
+			<Collapsible.Content>
+				<div class="space-y-3 pt-3">
+					<Alert.Root variant="warning-subtle" size="sm">
+						<InfoIcon class="size-4" />
+						<Alert.Description>
+							{m.git_sync_pre_deploy_acknowledgement()}
+						</Alert.Description>
+					</Alert.Root>
+
+					<p class="text-xs text-muted-foreground">{m.git_sync_pre_deploy_description()}</p>
+
+					<div class="space-y-2">
+						<Label for="preDeployScriptPath">
+							{m.git_sync_pre_deploy_script_path_label()}
+						</Label>
+						<div class="flex gap-2">
+							<div class="flex-1">
+								<Input
+									id="preDeployScriptPath"
+									type="text"
+									placeholder={m.git_sync_pre_deploy_script_path_placeholder()}
+									bind:value={inputs.preDeployScriptPath.value}
+									aria-invalid={inputs.preDeployScriptPath.error ? 'true' : undefined}
+								/>
+							</div>
+							{@render browseButton('preDeployScript')}
+						</div>
+						<p class="text-xs text-muted-foreground">{m.git_sync_pre_deploy_script_path_help()}</p>
+						{#if inputs.preDeployScriptPath.error}
+							<p class="text-xs font-medium text-destructive">{inputs.preDeployScriptPath.error}</p>
+						{/if}
+					</div>
+
+					<FormInput
+						label={m.git_sync_pre_deploy_runner_image_label()}
+						type="text"
+						placeholder={m.git_sync_pre_deploy_runner_image_placeholder()}
+						helpText={m.git_sync_pre_deploy_runner_image_help()}
+						bind:input={inputs.preDeployRunnerImage}
+					/>
+
+					<div class="grid gap-3 sm:grid-cols-2">
+						<FormInput
+							label={m.git_sync_pre_deploy_timeout_label()}
+							type="number"
+							placeholder="60"
+							helpText={m.git_sync_pre_deploy_timeout_help()}
+							bind:input={inputs.preDeployTimeoutSec}
+						/>
+						<FormInput
+							label={m.resource_network_cap()}
+							type="text"
+							placeholder={m.git_sync_pre_deploy_network_mode_placeholder()}
+							helpText={m.git_sync_pre_deploy_network_mode_help()}
+							bind:input={inputs.preDeployNetworkMode}
+						/>
+					</div>
+
+					<FormInput
+						type="textarea"
+						label={m.git_sync_pre_deploy_env_label()}
+						placeholder={m.git_sync_pre_deploy_env_placeholder()}
+						helpText={m.git_sync_pre_deploy_env_help()}
+						bind:input={inputs.preDeployEnv}
+						class="[&_textarea]:font-mono [&_textarea]:text-xs"
+					/>
+
+					<FormInput
+						type="textarea"
+						label={m.git_sync_pre_deploy_extra_mounts_label()}
+						placeholder={m.git_sync_pre_deploy_extra_mounts_placeholder()}
+						helpText={m.git_sync_pre_deploy_extra_mounts_help()}
+						bind:input={inputs.preDeployExtraMounts}
+						class="[&_textarea]:font-mono [&_textarea]:text-xs"
+					/>
+				</div>
+			</Collapsible.Content>
+		</Collapsible.Root>
+	{:else if lifecycleEnabled && canManageLifecycle}
+		<p class="text-xs text-muted-foreground">
+			<span class="font-medium">{m.git_sync_pre_deploy_title()}</span> · {m.git_sync_pre_deploy_swarm_unsupported()}
+		</p>
+	{:else if lifecycleEnabled}
+		<p class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+			<span><span class="font-medium">{m.git_sync_pre_deploy_title()}</span> · {m.git_sync_pre_deploy_managed_hint()}</span>
+			<span class="inline-flex shrink-0 items-center gap-1.5">
+				{#if hookConfigured}
+					<CodeIcon class="size-3.5" />
+					{m.common_configured()}
+				{:else}
+					{m.common_not_configured()}
+				{/if}
+			</span>
+		</p>
+	{/if}
 {/if}
 
 <p class="text-xs text-muted-foreground">

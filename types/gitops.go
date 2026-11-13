@@ -54,7 +54,10 @@ type (
 		LastSyncStatus      *string    `json:"lastSyncStatus,omitempty" readOnly:"true"`
 		BackupFailureReason *string    `json:"backupFailureReason,omitempty" readOnly:"true"`
 		LastBackupAt        *time.Time `json:"lastBackupAt,omitempty" readOnly:"true"`
-		ProjectName         string     `json:"projectName" required:"false"`
+
+		RailpackInfo *RailpackBuildInfo `json:"railpackInfo,omitempty" readOnly:"true" doc:"What the last Railpack build detected and produced"`
+
+		ProjectName string `json:"projectName" required:"false"`
 
 		PreDeployNetworkMode string `json:"preDeployNetworkMode" required:"false"`
 		Name                 string `json:"name" required:"false"`
@@ -62,16 +65,25 @@ type (
 
 		ComposeOverridePath string `json:"composeOverridePath,omitempty" required:"false" doc:"Repository path of a compose override file; empty auto-detects one beside the compose file"`
 
-		EnvironmentName string   `json:"environmentName,omitempty" readOnly:"true" doc:"Display name of the environment the sync belongs to"`
-		RepositoryID    string   `json:"repositoryId" required:"false"`
-		Branch          string   `json:"branch" required:"false"`
-		ComposePath     string   `json:"composePath" required:"false"`
-		ID              string   `json:"id" readOnly:"true"`
-		TargetType      string   `json:"targetType" required:"false"`
-		Mode            string   `json:"mode" required:"false"`
-		BackupDirectory string   `json:"backupDirectory,omitempty"`
-		BackupState     string   `json:"backupState,omitempty" readOnly:"true"`
-		BackupPaths     []string `json:"backupPaths,omitempty"`
+		EnvironmentName string `json:"environmentName,omitempty" readOnly:"true" doc:"Display name of the environment the sync belongs to"`
+		RepositoryID    string `json:"repositoryId" required:"false"`
+		Branch          string `json:"branch" required:"false"`
+		ComposePath     string `json:"composePath" required:"false"`
+		ID              string `json:"id" readOnly:"true"`
+		TargetType      string `json:"targetType" required:"false"`
+		Mode            string `json:"mode" required:"false"`
+		BackupDirectory string `json:"backupDirectory,omitempty"`
+		BackupState     string `json:"backupState,omitempty" readOnly:"true"`
+
+		BuildStrategy string `json:"buildStrategy" required:"false" enum:",compose,railpack" doc:"compose (the default) deploys the repository's compose file; railpack builds the app without a Dockerfile"`
+		SourcePath    string `json:"sourcePath,omitempty" required:"false" doc:"Repository directory holding the app Railpack builds; empty is the repository root"`
+		BuildCommand  string `json:"buildCommand,omitempty" required:"false" doc:"Overrides the build command Railpack detects"`
+		StartCommand  string `json:"startCommand,omitempty" required:"false" doc:"Overrides the start command Railpack detects"`
+
+		BackupPaths []string `json:"backupPaths,omitempty"`
+
+		AppPort  int `json:"appPort" required:"false" minimum:"0" maximum:"65535" doc:"Port the app listens on, passed as PORT; 0 uses 3000"`
+		HostPort int `json:"hostPort" required:"false" minimum:"0" maximum:"65535" doc:"Host port that publishes the app; 0 keeps it unpublished"`
 
 		PreDeployTimeoutSec int `json:"preDeployTimeoutSec" required:"false"`
 
@@ -118,8 +130,10 @@ type (
 	GitOpsSyncResult struct {
 		SyncedAt time.Time `json:"syncedAt"`
 		Error    *string   `json:"error,omitempty"`
-		Message  string    `json:"message"`
-		Success  bool      `json:"success"`
+		// Set when the sync builds from source and keeps running after the response.
+		ActivityID *string `json:"activityId,omitempty" doc:"Activity that tracks a sync still running in the background"`
+		Message    string  `json:"message"`
+		Success    bool    `json:"success"`
 	}
 
 	FileTreeNodeType string
@@ -259,6 +273,8 @@ type (
 const (
 	GitOpsSyncModeDeploy                                    = "deploy"
 	GitOpsSyncModeBackup                                    = "backup"
+	GitOpsBuildStrategyCompose                              = "compose"
+	GitOpsBuildStrategyRailpack                             = "railpack"
 	GitOpsBackupStateNever                                  = "never"
 	GitOpsBackupStatePending                                = "pending"
 	GitOpsBackupStateBackingUp                              = "backing_up"

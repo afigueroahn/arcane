@@ -11,8 +11,22 @@
 				projectId: z.string().default(''),
 				repositoryId: z.string().min(1, m.common_required()),
 				branch: z.string().min(1, m.common_required()),
+				buildStrategy: z.enum(['compose', 'railpack']).default('compose'),
 				composePath: z.string().default(''),
 				composeOverridePath: z.string().default(''),
+				sourcePath: z.string().default(''),
+				buildCommand: z.string().default(''),
+				startCommand: z.string().default(''),
+				appPort: z.coerce
+					.number()
+					.int()
+					.min(1, m.notifications_signal_port_invalid())
+					.max(65535, m.notifications_signal_port_invalid()),
+				hostPort: z.coerce
+					.number()
+					.int()
+					.min(0, m.notifications_signal_port_invalid())
+					.max(65535, m.notifications_signal_port_invalid()),
 				envContent: z.string().default(''),
 				backupDirectory: z.string().default(''),
 				backupPaths: z.array(z.string()).default([]),
@@ -53,7 +67,7 @@
 				if (!value.name.trim()) {
 					ctx.issues.push({ code: 'custom', message: m.common_name_required(), path: ['name'], input: value });
 				}
-				if (!value.composePath.trim()) {
+				if (value.buildStrategy === 'compose' && !value.composePath.trim()) {
 					ctx.issues.push({ code: 'custom', message: m.common_required(), path: ['composePath'], input: value });
 				}
 			});
@@ -82,7 +96,14 @@
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { gitOpsSyncService } from '#lib/services/gitops-sync-service.js';
 	import { projectService } from '#lib/services/project-service.js';
-	import type { FileTreeNode, GitBranchInfo, GitOpsSync, GitOpsSyncMode, GitRepository } from '#lib/types/gitops.js';
+	import type {
+		FileTreeNode,
+		GitBranchInfo,
+		GitOpsBuildStrategy,
+		GitOpsSync,
+		GitOpsSyncMode,
+		GitRepository
+	} from '#lib/types/gitops.js';
 	import type { Project } from '#lib/types/project.js';
 	import type { Settings } from '#lib/types/settings.js';
 	import type { GitOpsSyncCreate, GitOpsSyncUpdate, GitOpsSyncWritable } from '#lib/types/ui/gitops.js';
@@ -102,6 +123,7 @@
 		mode: GitOpsSyncMode;
 		targetType?: string;
 		projectId?: string;
+		buildStrategy?: GitOpsBuildStrategy;
 		settings: Settings;
 		onSubmit: (detail: { sync: GitOpsSyncCreate | GitOpsSyncUpdate; isEditMode: boolean }) => void;
 	};
@@ -113,6 +135,7 @@
 		mode = $bindable(),
 		targetType,
 		projectId,
+		buildStrategy,
 		settings,
 		onSubmit
 	}: GitOpsSyncFormProps = $props();
@@ -147,6 +170,10 @@
 	}
 
 	let selectedTargetType = $state<GitOpsSyncTargetType>(untrack(() => normalizeTargetType(syncToEdit?.targetType ?? targetType)));
+	const initialBuildStrategy: GitOpsBuildStrategy = untrack(() => syncToEdit?.buildStrategy ?? buildStrategy ?? 'compose');
+	const defaultRailpackAppPort = 3000;
+	// Offered with images:build, or when editing a sync that already builds from source.
+	const canBuildFromSource = $derived(hasPermission('images:build', environmentId) || syncToEdit?.buildStrategy === 'railpack');
 
 	const envFileName = '.env';
 	const bytesPerMegabyte = 1024 * 1024;
@@ -168,8 +195,14 @@
 			projectId: syncToEdit?.projectId ?? projectId ?? '',
 			repositoryId: syncToEdit?.repositoryId ?? '',
 			branch: syncToEdit?.branch ?? 'main',
-			composePath: syncToEdit?.composePath ?? composePathFor(selectedTargetType),
+			buildStrategy: initialBuildStrategy,
+			composePath: syncToEdit?.composePath || composePathFor(selectedTargetType),
 			composeOverridePath: syncToEdit?.composeOverridePath ?? '',
+			sourcePath: syncToEdit?.sourcePath ?? '',
+			buildCommand: syncToEdit?.buildCommand ?? '',
+			startCommand: syncToEdit?.startCommand ?? '',
+			appPort: syncToEdit?.appPort || defaultRailpackAppPort,
+			hostPort: syncToEdit?.hostPort ?? 0,
 			envContent: syncToEdit?.envContent ?? '',
 			backupDirectory: syncToEdit?.backupDirectory ?? '',
 			backupPaths: syncToEdit?.backupPaths ?? [],
@@ -177,7 +210,8 @@
 			backupOnSave: syncToEdit?.backupOnSave ?? true,
 			syncDirectory: syncToEdit?.syncDirectory ?? false,
 			pullImageAfterSync: syncToEdit?.pullImageAfterSync ?? false,
-			redeployAfterSync: syncToEdit?.redeployAfterSync ?? false,
+			// A Railpack sync exists to deploy what it builds, so new ones redeploy by default.
+			redeployAfterSync: syncToEdit?.redeployAfterSync ?? initialBuildStrategy === 'railpack',
 			maxSyncFiles: syncToEdit ? (syncToEdit.maxSyncFiles ?? 0) : (settings.gitSyncMaxFiles ?? 0),
 			maxSyncTotalSizeMb: syncToEdit
 				? bytesToMegabytesInternal(syncToEdit.maxSyncTotalSize, 0)
@@ -244,7 +278,7 @@
 	}
 
 	function shouldSubmitLifecycleFieldsInternal(data: z.infer<GitOpsSyncFormSchema>): boolean {
-		if (!lifecycleEnabled || !canManageLifecycle || selectedTargetType !== 'project') {
+		if (!lifecycleEnabled || !canManageLifecycle || selectedTargetType !== 'project' || data.buildStrategy === 'railpack') {
 			return false;
 		}
 
@@ -409,6 +443,17 @@
 		}
 	}
 
+	// A Railpack sync always creates its own project and deploys what it builds.
+	function handleBuildStrategyChange(value: GitOpsBuildStrategy) {
+		inputs.buildStrategy.value = value;
+		if (value !== 'railpack') return;
+		handleTargetTypeChange('project');
+		inputs.projectId.value = '';
+		inputs.syncDirectory.value = false;
+		inputs.pullImageAfterSync.value = false;
+		if (!isEditMode) inputs.redeployAfterSync.value = true;
+	}
+
 	function buildBackupPayloadInternal(data: z.infer<GitOpsSyncFormSchema>): GitOpsSyncCreate | GitOpsSyncUpdate {
 		const name = data.name.trim() || backupNamePlaceholder;
 		const repositoryId = selectedRepository?.value || data.repositoryId;
@@ -458,12 +503,14 @@
 			return;
 		}
 
+		const isRailpack = data.buildStrategy === 'railpack';
 		const fields: GitOpsSyncCreate = {
 			name: data.name,
 			repositoryId: selectedRepository?.value || data.repositoryId,
 			branch: data.branch,
-			composePath: data.composePath,
-			composeOverridePath: data.composeOverridePath.trim(),
+			buildStrategy: data.buildStrategy,
+			composePath: isRailpack ? '' : data.composePath,
+			composeOverridePath: isRailpack ? '' : data.composeOverridePath.trim(),
 			envContent: data.envContent.trim(),
 			targetType: selectedTargetType,
 			projectName: selectedProject?.name ?? data.name,
@@ -474,7 +521,16 @@
 			maxSyncTotalSize: megabytesToBytesInternal(data.maxSyncTotalSizeMb),
 			maxSyncBinarySize: megabytesToBytesInternal(data.maxSyncBinarySizeMb),
 			autoSync: data.autoSync,
-			syncInterval: data.syncInterval
+			syncInterval: data.syncInterval,
+			...(isRailpack
+				? {
+						sourcePath: data.sourcePath.trim(),
+						buildCommand: data.buildCommand.trim(),
+						startCommand: data.startCommand.trim(),
+						appPort: data.appPort,
+						hostPort: data.hostPort
+					}
+				: {})
 		};
 
 		const payload: GitOpsSyncCreate | GitOpsSyncUpdate =
@@ -483,11 +539,15 @@
 						{
 							...syncToEdit,
 							composeOverridePath: syncToEdit.composeOverridePath ?? '',
-							envContent: syncToEdit.envContent ?? ''
+							envContent: syncToEdit.envContent ?? '',
+							sourcePath: syncToEdit.sourcePath ?? '',
+							buildCommand: syncToEdit.buildCommand ?? '',
+							startCommand: syncToEdit.startCommand ?? '',
+							appPort: syncToEdit.appPort || defaultRailpackAppPort
 						},
 						fields
 					)
-				: { ...fields, ...(data.projectId ? { projectId: data.projectId } : {}) };
+				: { ...fields, ...(data.projectId && !isRailpack ? { projectId: data.projectId } : {}) };
 
 		if (shouldSubmitLifecycleFieldsInternal(data)) {
 			payload.preDeployScriptPath = data.preDeployScriptPath.trim();
@@ -606,6 +666,10 @@
 			<GitOpsSyncFormFields
 				{form}
 				{isEditMode}
+				{environmentId}
+				{canBuildFromSource}
+				onBuildStrategyChange={handleBuildStrategyChange}
+				railpackInfo={syncToEdit?.railpackInfo}
 				{selectedTargetType}
 				onTargetTypeChange={handleTargetTypeChange}
 				{projectOptions}

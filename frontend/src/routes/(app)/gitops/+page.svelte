@@ -14,7 +14,13 @@
 	import { gitOpsSyncListQuery } from '#lib/query/gitops.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { gitOpsSyncService } from '#lib/services/gitops-sync-service.js';
-	import type { GitOpsSync, GitOpsSyncCounts, GitOpsSyncMode, ImportGitOpsSyncRequest } from '#lib/types/gitops.js';
+	import type {
+		GitOpsBuildStrategy,
+		GitOpsSync,
+		GitOpsSyncCounts,
+		GitOpsSyncMode,
+		ImportGitOpsSyncRequest
+	} from '#lib/types/gitops.js';
 	import type { GitOpsSyncCreate, GitOpsSyncUpdate } from '#lib/types/ui/gitops.js';
 	import { extractApiErrorMessage, handleApiResultWithCallbacks } from '#lib/utils/api.js';
 	import { destinationEnvironmentId, hasShownPermission, readableEnvironments } from '#lib/utils/environments.js';
@@ -61,12 +67,19 @@
 			target
 				? gitOpsSyncService.updateSync(target.environmentId, target.id, sync as GitOpsSyncUpdate)
 				: gitOpsSyncService.createSync(environmentId, sync as GitOpsSyncCreate),
-		onSuccess: async (_result, { target }) => {
-			toast.success(
-				target
-					? m.common_update_success({ resource: m.resource_sync() })
-					: m.common_create_success({ resource: m.resource_sync() })
-			);
+		onSuccess: async (_result, { sync, target }) => {
+			if (!target && sync.buildStrategy === 'railpack') {
+				// The first Railpack build keeps running after the sync is saved.
+				toast.success(m.common_create_success({ resource: m.resource_sync() }), {
+					description: m.railpack_first_build_started()
+				});
+			} else {
+				toast.success(
+					target
+						? m.common_update_success({ resource: m.resource_sync() })
+						: m.common_create_success({ resource: m.resource_sync() })
+				);
+			}
 			await queryClient.invalidateQueries({ queryKey: queryKeys.gitOpsSyncs.listPrefix(pageState.scope) });
 			isSyncDialogOpen = false;
 		},
@@ -118,9 +131,14 @@
 	let dialogTargetType = $state<string | undefined>(undefined);
 	let dialogMode = $state<GitOpsSyncMode | undefined>(undefined);
 	let dialogProjectId = $state<string | undefined>(undefined);
+	let dialogBuildStrategy = $state<GitOpsBuildStrategy | undefined>(undefined);
 
 	function parseSyncMode(value: string | null): GitOpsSyncMode | undefined {
 		return value === 'deploy' || value === 'backup' ? value : undefined;
+	}
+
+	function parseBuildStrategy(value: string | null): GitOpsBuildStrategy | undefined {
+		return value === 'compose' || value === 'railpack' ? value : undefined;
 	}
 
 	afterNavigate(() => {
@@ -131,7 +149,8 @@
 			openCreateSyncDialog(
 				page.url.searchParams.get('targetType') ?? undefined,
 				parseSyncMode(page.url.searchParams.get('mode')),
-				page.url.searchParams.get('projectId') ?? undefined
+				page.url.searchParams.get('projectId') ?? undefined,
+				parseBuildStrategy(page.url.searchParams.get('buildStrategy'))
 			);
 		} else if (action === 'edit') {
 			const syncId = page.url.searchParams.get('syncId');
@@ -142,7 +161,7 @@
 		}
 
 		const newUrl = new URL(page.url.href);
-		for (const param of ['action', 'targetType', 'mode', 'projectId', 'syncId', 'env']) {
+		for (const param of ['action', 'targetType', 'mode', 'projectId', 'buildStrategy', 'syncId', 'env']) {
 			newUrl.searchParams.delete(param);
 		}
 		void goto(`${resolve('/(app)/gitops')}${newUrl.searchParams.size > 0 ? `?${newUrl.searchParams}` : ''}`, {
@@ -151,11 +170,17 @@
 		});
 	});
 
-	function openCreateSyncDialog(targetType?: string | Event, mode?: GitOpsSyncMode, projectId?: string) {
+	function openCreateSyncDialog(
+		targetType?: string | Event,
+		mode?: GitOpsSyncMode,
+		projectId?: string,
+		buildStrategy?: GitOpsBuildStrategy
+	) {
 		syncToEdit = null;
 		dialogTargetType = typeof targetType === 'string' ? targetType : undefined;
 		dialogMode = mode;
 		dialogProjectId = projectId;
+		dialogBuildStrategy = buildStrategy;
 		syncSession += 1;
 		isSyncDialogOpen = true;
 	}
@@ -165,6 +190,7 @@
 		dialogTargetType = undefined;
 		dialogMode = undefined;
 		dialogProjectId = undefined;
+		dialogBuildStrategy = undefined;
 		syncSession += 1;
 		isSyncDialogOpen = true;
 	}
@@ -288,6 +314,7 @@
 					targetType={dialogTargetType}
 					mode={dialogMode}
 					projectId={dialogProjectId}
+					buildStrategy={dialogBuildStrategy}
 					onSubmit={handleSyncDialogSubmit}
 					isLoading={saveSyncMutation.isPending || isLoadingSync}
 				/>

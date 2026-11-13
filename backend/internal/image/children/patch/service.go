@@ -893,10 +893,8 @@ func (s *Service) requireContainerdImageStore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to inspect Docker: %w", err)
 	}
-	for _, status := range info.Info.DriverStatus {
-		if status[0] == "driver-type" && status[1] == "io.containerd.snapshotter.v1" {
-			return nil
-		}
+	if docker.UsesContainerdImageStore(info.Info) {
+		return nil
 	}
 	return common.ErrPatchRequiresContainerdImageStore
 }

@@ -7,7 +7,14 @@
 	import * as ButtonGroup from '#lib/components/ui/button-group/index.js';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import { TerminalIcon, TemplateIcon, AddIcon, ArrowDownIcon as ChevronDown, GitBranchIcon } from '#lib/icons/index.js';
+	import {
+		TerminalIcon,
+		TemplateIcon,
+		AddIcon,
+		ArrowDownIcon as ChevronDown,
+		GitBranchIcon,
+		HammerIcon
+	} from '#lib/icons/index.js';
 	import { templateBtnClass } from '#lib/utils/compose-flow.js';
 	import type { ShortcutKey } from '#lib/utils/navigation.js';
 
@@ -34,6 +41,9 @@
 		onConvert: () => void;
 		fromGitLabel: string;
 		onFromGit: () => void | Promise<void>;
+		/** Offered only where a Git sync can build the app itself (projects, not swarm stacks). */
+		fromSourceLabel?: string;
+		onFromSource?: () => void | Promise<void>;
 
 		createTemplateLabel: string;
 		createTemplateDisabled: boolean;
@@ -63,6 +73,8 @@
 		onConvert,
 		fromGitLabel,
 		onFromGit,
+		fromSourceLabel,
+		onFromSource,
 		createTemplateLabel,
 		createTemplateDisabled,
 		createTemplateLoading,
@@ -141,6 +153,12 @@
 					<GitBranchIcon class="size-4" />
 					{fromGitLabel}
 				</DropdownMenu.Item>
+				{#if fromSourceLabel && onFromSource}
+					<DropdownMenu.Item onclick={onFromSource}>
+						<HammerIcon class="size-4" />
+						{fromSourceLabel}
+					</DropdownMenu.Item>
+				{/if}
 				{#if createTemplatePermission}
 					<IfPermitted perm={createTemplatePermission}>
 						<DropdownMenu.Separator />

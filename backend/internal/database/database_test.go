@@ -825,6 +825,26 @@ func TestMigration113_SplitsPasswordPolicyIntoGranularSettings(t *testing.T) {
 	})
 }
 
+func TestMigration114_AddsGitOpsBuildStrategy(t *testing.T) {
+	ctx := t.Context()
+	rawDB, _ := newSQLiteSQLDB(t, t.TempDir(), "arcane-gitops-build-strategy.db")
+	syncColumns := func() int {
+		var count int
+		require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('gitops_syncs')
+WHERE name IN ('build_strategy', 'source_path', 'build_command', 'start_command', 'app_port', 'host_port', 'railpack_info')`).Scan(&count))
+		return count
+	}
+
+	require.NoError(t, migrateDatabase(ctx, rawDB, dbProviderSQLite, MigrationOptions{}, 114))
+	assert.Equal(t, 7, syncColumns())
+	var strategyDefault string
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT dflt_value FROM pragma_table_info('gitops_syncs') WHERE name = 'build_strategy'`).Scan(&strategyDefault))
+	assert.Equal(t, "'compose'", strategyDefault)
+
+	require.NoError(t, migrateDatabase(ctx, rawDB, dbProviderSQLite, MigrationOptions{AllowDowngrade: true}, 113))
+	assert.Zero(t, syncColumns())
+}
+
 func TestMigrateDatabase_BlocksFutureGooseVersionWithoutFlag(t *testing.T) {
 	ctx := t.Context()
 	rawDB, dsn := newSQLiteSQLDB(t, t.TempDir(), "arcane-future.db")

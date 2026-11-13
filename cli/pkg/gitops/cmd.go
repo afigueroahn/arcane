@@ -18,6 +18,16 @@ import (
 	"getarcane.dev/types/v3"
 )
 
+// railpackFlags are the build-from-source settings that create and update both accept.
+type railpackFlags struct {
+	buildStrategy string
+	sourcePath    string
+	buildCommand  string
+	startCommand  string
+	appPort       int
+	hostPort      int
+}
+
 var gitopsSyncRef = cmdutil.ResourceRef[types.GitOpsSync, types.GitOpsSync]{
 	EnvironmentScoped: true,
 	Singular:          "gitops sync",
@@ -106,6 +116,7 @@ func newCreateCmd() *cobra.Command {
 		branch      string
 		composePath string
 		projectName string
+		railpack    railpackFlags
 		autoSync    bool
 		interval    int
 	}
@@ -115,6 +126,9 @@ func newCreateCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.railpack.buildStrategy != types.GitOpsBuildStrategyRailpack && strings.TrimSpace(opts.composePath) == "" {
+				return fmt.Errorf("--compose-path is required unless --build-strategy is %s", types.GitOpsBuildStrategyRailpack)
+			}
 			c, err := cmdutil.ClientFromCommand(cmd)
 			if err != nil {
 				return err
@@ -131,6 +145,7 @@ func newCreateCmd() *cobra.Command {
 			if cmd.Flags().Changed("interval") {
 				req["syncInterval"] = opts.interval
 			}
+			opts.railpack.apply(cmd, req)
 
 			return cmdutil.Run(cmd, c, cmdutil.Spec[types.GitOpsSync]{
 				Method:         http.MethodPost,
@@ -152,11 +167,40 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.autoSync, "auto-sync", false, "Enable automatic sync")
 	cmd.Flags().IntVar(&opts.interval, "interval", 0, "Sync interval in minutes")
 	cmd.Flags().StringVar(&opts.projectName, "project-name", "", "Project name for the sync")
+	opts.railpack.register(cmd)
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("repo-id")
 	_ = cmd.MarkFlagRequired("branch")
-	_ = cmd.MarkFlagRequired("compose-path")
 	return cmd
+}
+
+func (f *railpackFlags) register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.buildStrategy, "build-strategy", "", "How the sync deploys: compose (the default) or railpack, which builds the app without a Dockerfile")
+	cmd.Flags().StringVar(&f.sourcePath, "source-path", "", "Railpack: repository folder that holds the app (default: repository root)")
+	cmd.Flags().StringVar(&f.buildCommand, "build-command", "", "Railpack: override the detected build command")
+	cmd.Flags().StringVar(&f.startCommand, "start-command", "", "Railpack: override the detected start command")
+	cmd.Flags().IntVar(&f.appPort, "app-port", 0, "Railpack: port the app listens on, passed as PORT (default: 3000)")
+	cmd.Flags().IntVar(&f.hostPort, "host-port", 0, "Railpack: host port that publishes the app (default: unpublished)")
+}
+
+// apply adds the flags the user set, so a compose sync never sends Railpack settings.
+func (f *railpackFlags) apply(cmd *cobra.Command, req map[string]any) {
+	for _, field := range []struct {
+		value any
+		flag  string
+		key   string
+	}{
+		{flag: "build-strategy", key: "buildStrategy", value: f.buildStrategy},
+		{flag: "source-path", key: "sourcePath", value: f.sourcePath},
+		{flag: "build-command", key: "buildCommand", value: f.buildCommand},
+		{flag: "start-command", key: "startCommand", value: f.startCommand},
+		{flag: "app-port", key: "appPort", value: f.appPort},
+		{flag: "host-port", key: "hostPort", value: f.hostPort},
+	} {
+		if cmd.Flags().Changed(field.flag) {
+			req[field.key] = field.value
+		}
+	}
 }
 
 func newGetCmd() *cobra.Command {
@@ -184,7 +228,17 @@ func newGetCmd() *cobra.Command {
 			output.KeyValue("ID", resolved.ID)
 			output.KeyValue("Name", resolved.Name)
 			output.KeyValue("Branch", resolved.Branch)
-			output.KeyValue("Compose Path", resolved.ComposePath)
+			output.KeyValue("Build Strategy", cmp.Or(resolved.BuildStrategy, types.GitOpsBuildStrategyCompose))
+			if resolved.BuildStrategy == types.GitOpsBuildStrategyRailpack {
+				output.KeyValue("Source Path", cmp.Or(resolved.SourcePath, "."))
+				output.KeyValue("App Port", cmp.Or(resolved.AppPort, 3000))
+				output.KeyValue("Host Port", kit.Ternary(resolved.HostPort > 0, strconv.Itoa(resolved.HostPort), "unpublished"))
+				if resolved.RailpackInfo != nil {
+					output.KeyValue("Last Image", resolved.RailpackInfo.Image)
+				}
+			} else {
+				output.KeyValue("Compose Path", resolved.ComposePath)
+			}
 			output.KeyValue("Project Name", resolved.ProjectName)
 			output.KeyValue("Auto Sync", resolved.AutoSync)
 			output.KeyValue("Sync Interval", fmt.Sprintf("%d min", resolved.SyncInterval))
@@ -211,6 +265,7 @@ func newUpdateCmd() *cobra.Command {
 		branch      string
 		composePath string
 		projectName string
+		railpack    railpackFlags
 		autoSync    bool
 		interval    int
 	}
@@ -248,6 +303,7 @@ func newUpdateCmd() *cobra.Command {
 					req[field.key] = field.value
 				}
 			}
+			opts.railpack.apply(cmd, req)
 
 			return cmdutil.Run(cmd, c, cmdutil.Spec[types.GitOpsSync]{
 				Method:         http.MethodPatch,
@@ -268,6 +324,7 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.projectName, "project-name", "", "Project name for the sync")
 	cmd.Flags().BoolVar(&opts.autoSync, "auto-sync", false, "Enable automatic sync")
 	cmd.Flags().IntVar(&opts.interval, "interval", 0, "Sync interval in minutes")
+	opts.railpack.register(cmd)
 	cmdutil.SetResource(gitopsSyncRef, cmd)
 	return cmd
 }
@@ -382,6 +439,9 @@ func newSyncCmd() *cobra.Command {
 				Render: func(data types.GitOpsSyncResult) error {
 					if data.Success {
 						output.Success("Sync triggered successfully: %s", data.Message)
+						if data.ActivityID != nil {
+							output.KeyValue("Activity", *data.ActivityID)
+						}
 						return nil
 					}
 					return fmt.Errorf("sync failed: %s %s", data.Message, kit.FromPtr(data.Error))

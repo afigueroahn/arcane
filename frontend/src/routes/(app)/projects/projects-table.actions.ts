@@ -10,6 +10,7 @@ import { activityToastOptions, extractActivityId } from '#lib/utils/activity-toa
 import { handleApiResultWithCallbacks } from '#lib/utils/api.js';
 import { bulkConfirmAndRun } from '#lib/utils/bulk-actions.js';
 import { rowKey } from '#lib/utils/environments.js';
+import { showGitSyncResultToast } from '#lib/utils/gitops.js';
 import type { TableActionConfig, TableBulkActionConfig } from '#lib/utils/table-action-types.js';
 import { tryCatch } from '#lib/utils/try-catch.js';
 
@@ -199,8 +200,8 @@ export function createProjectActions({
 			setLoadingState: (value) => {
 				actionStatus[key] = value ? 'syncing' : '';
 			},
-			onSuccess: async () => {
-				toast.success(m.git_sync_success());
+			onSuccess: async (syncResult) => {
+				showGitSyncResultToast(syncResult, environmentId);
 				await refreshProjects();
 			}
 		});

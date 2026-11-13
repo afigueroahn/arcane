@@ -5,6 +5,7 @@ import {
 	BroomIcon,
 	DownloadIcon,
 	EditIcon,
+	GitBranchIcon,
 	HammerIcon,
 	PauseIcon,
 	PlayIcon,
@@ -59,7 +60,8 @@ const typeDisplay = new Map(
 		vulnerability_scan: { label: m.activity_type_vulnerability_scan, icon: SearchIcon },
 		auto_update: { label: m.auto_update, icon: RefreshIcon },
 		system_prune: { label: m.activity_type_system_prune, icon: BroomIcon },
-		resource_action: { label: m.activity_type_resource_action, icon: ActivityIcon }
+		resource_action: { label: m.activity_type_resource_action, icon: ActivityIcon },
+		gitops_sync: { label: m.activity_type_gitops_sync, icon: GitBranchIcon }
 	} satisfies Record<ActivityType, { label: () => string; icon: IconType }>)
 );
 

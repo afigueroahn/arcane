@@ -259,6 +259,13 @@ func (s *ProjectService) EnsureGitOpsProjectLinked(ctx context.Context, gitOpsSy
 		BackupFailureReason:    gitOpsSync.BackupFailureReason,
 		LastBackupAt:           gitOpsSync.LastBackupAt,
 		LastBackupSnapshot:     gitOpsSync.LastBackupSnapshot,
+		BuildStrategy:          gitOpsSync.BuildStrategy,
+		SourcePath:             gitOpsSync.SourcePath,
+		BuildCommand:           gitOpsSync.BuildCommand,
+		StartCommand:           gitOpsSync.StartCommand,
+		AppPort:                gitOpsSync.AppPort,
+		HostPort:               gitOpsSync.HostPort,
+		RailpackInfo:           gitOpsSync.RailpackInfo,
 	}
 	*project = Project{ //exhaustruct:enforce
 		BaseModel:          project.BaseModel,

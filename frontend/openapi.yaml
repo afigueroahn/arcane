@@ -13366,6 +13366,12 @@ components:
           format: uri
           readOnly: true
           type: string
+        appPort:
+          description: Port the app listens on, passed as PORT; 0 uses 3000
+          format: int64
+          maximum: 65535
+          minimum: 0
+          type: integer
         autoSync:
           type: boolean
         backupDirectory:
@@ -13389,6 +13395,16 @@ components:
           type: string
         branch:
           type: string
+        buildCommand:
+          description: Overrides the build command Railpack detects
+          type: string
+        buildStrategy:
+          description: compose (the default) deploys the repository's compose file; railpack builds the app without a Dockerfile
+          enum:
+            - ""
+            - compose
+            - railpack
+          type: string
         composeOverridePath:
           description: Repository path of a compose override file; empty auto-detects one beside the compose file
           type: string
@@ -13408,6 +13424,12 @@ components:
           description: Display name of the environment the sync belongs to
           readOnly: true
           type: string
+        hostPort:
+          description: Host port that publishes the app; 0 keeps it unpublished
+          format: int64
+          maximum: 65535
+          minimum: 0
+          type: integer
         id:
           readOnly: true
           type: string
@@ -13470,12 +13492,22 @@ components:
           type: string
         pullImageAfterSync:
           type: boolean
+        railpackInfo:
+          $ref: "#/components/schemas/RailpackBuildInfo"
+          description: What the last Railpack build detected and produced
+          readOnly: true
         redeployAfterSync:
           type: boolean
         repository:
           $ref: "#/components/schemas/GitRepository"
           readOnly: true
         repositoryId:
+          type: string
+        sourcePath:
+          description: Repository directory holding the app Railpack builds; empty is the repository root
+          type: string
+        startCommand:
+          description: Overrides the start command Railpack detects
           type: string
         syncDirectory:
           type: boolean
@@ -13526,6 +13558,9 @@ components:
     GitOpsSyncResult:
       additionalProperties: false
       properties:
+        activityId:
+          description: Activity that tracks a sync still running in the background
+          type: string
         error:
           type: string
         message:
@@ -20864,6 +20899,29 @@ components:
       required:
         - ElectionTick
         - HeartbeatTick
+      type: object
+    RailpackBuildInfo:
+      additionalProperties: false
+      properties:
+        image:
+          description: Image built from the synced commit
+          type: string
+        packages:
+          additionalProperties:
+            type: string
+          description: Package versions Railpack resolved; later builds reuse them
+          type: object
+        providers:
+          description: Railpack providers detected for the app
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        railpackVersion:
+          type: string
+      required:
+        - image
       type: object
     ReadinessResponse:
       additionalProperties: false

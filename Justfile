@@ -34,7 +34,7 @@ mod snyk 'just/snyk.just'
 [group('dependencies')]
 mod deps 'just/deps.just'
 
-# Generate code: proto
+# Generate code: proto, openapi
 [group('generation')]
 mod generate 'just/generate.just'
 

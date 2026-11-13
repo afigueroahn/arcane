@@ -144,6 +144,9 @@ just lint frontend
 just format frontend
 just format all --check
 
+# Code generation (after changing API routes or types)
+just generate openapi
+
 # Dependencies
 just deps install all
 ```

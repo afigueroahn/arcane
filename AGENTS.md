@@ -215,11 +215,12 @@ frontend/src/
     ├── config/          navigation and access-surface configuration
     ├── hooks/           reusable reactive behavior
     ├── layouts/         shared layout components
+    ├── openapi/         API types generated from openapi.yaml
     ├── query/           shared query keys
     ├── paraglide/       generated message code
     ├── services/        API clients extending BaseAPIService
     ├── stores/          rune-based application state
-    ├── types/           frontend-only TypeScript types
+    ├── types/           API contracts and frontend-only types
     └── utils/           frontend utilities
 ```
 
@@ -230,6 +231,15 @@ frontend/src/
 - **Services:** extend `BaseAPIService`. Reuse existing services and query/mutation patterns.
 - **Types:** precise TypeScript. No `any`.
 - **Components:** reuse shared ones before making page-local variants.
+
+### API types
+
+- **Spec:** `frontend/openapi.yaml` is the backend's OpenAPI spec.
+  - Run `just generate openapi` after changing routes or `types/`. A backend test fails when it is stale.
+- **Generated:** `src/lib/openapi/schema.d.ts`, rebuilt by `vp -C frontend run check`. Never edit or commit it.
+- **Contracts:** define API types in `lib/types/` as aliases of the schema.
+  - `export type PortMapping = components['schemas']['PortMapping'];`
+- **Imports:** `import type` only. The schema has no runtime module.
 
 ### Error handling
 

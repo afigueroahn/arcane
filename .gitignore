@@ -67,3 +67,6 @@ inspections/**
 
 # inlang plugin cache (refetched on every Paraglide build)
 frontend/project.inlang/cache/
+
+# API types generated from frontend/openapi.yaml
+frontend/src/lib/openapi/

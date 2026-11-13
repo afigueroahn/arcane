@@ -1,10 +1,3 @@
-export interface PortMapping {
-	id: string;
-	containerId: string;
-	containerName: string;
-	hostIp?: string;
-	protocol: string;
-	hostPort?: number;
-	containerPort: number;
-	isPublished: boolean;
-}
+import type { components } from '#lib/openapi/schema.js';
+
+export type PortMapping = components['schemas']['PortMapping'];

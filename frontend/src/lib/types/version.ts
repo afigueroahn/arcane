@@ -1,21 +1,3 @@
-export type VersionInfo = {
-	currentVersion: string;
-	currentTag?: string;
-	currentDigest?: string;
-	displayVersion: string;
-	revision: string;
-	shortRevision: string;
-	goVersion: string;
-	nodeVersion: string;
-	svelteKitVersion: string;
-	enabledFeatures?: string[];
-	buildTime?: string;
-	isSemverVersion: boolean;
-	isStableVersion: boolean;
-	newestVersion?: string;
-	newestDigest?: string;
-	updateAvailable: boolean;
-	releaseUrl?: string;
-	releaseNotes?: string;
-	releasedAt?: string;
-};
+import type { components } from '#lib/openapi/schema.js';
+
+export type VersionInfo = components['schemas']['VersionInfo'];
